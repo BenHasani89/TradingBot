@@ -58,7 +58,11 @@ class TradingOrchestrator:
 
         Returns:
             Ergebnis des Zyklus. `order`/`execution` sind `None`, wenn das
-            Signal nicht genehmigt wurde.
+            Signal nicht genehmigt wurde oder - bei BUY - nicht genügend
+            Kapital im Portfolio verfügbar ist (siehe
+            `PortfolioManager.available_cash()`). Ein Trade kann so nie
+            negatives Kapital erzeugen; der `PaperBroker` wird in diesem
+            Fall gar nicht erst aufgerufen.
 
         Raises:
             RuntimeError: wenn die `TradingEngine` nicht aktiv ist.
@@ -91,6 +95,23 @@ class TradingOrchestrator:
 
         current_price = candles[-1].close
         quantity = decision.position_size / current_price
+
+        if side == "BUY":
+            required_cash = quantity * current_price
+            available_cash = self._portfolio.available_cash()
+            if required_cash > available_cash:
+                logger.info(
+                    "Zyklus ohne Order beendet: nicht genügend Kapital "
+                    "(benötigt {}, verfügbar {})",
+                    required_cash,
+                    available_cash,
+                )
+                return TradingCycleResult(
+                    signal=signal,
+                    decision=decision,
+                    order=None,
+                    execution=None,
+                )
 
         order = Order(
             symbol=signal.symbol,

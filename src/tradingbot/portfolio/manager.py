@@ -38,6 +38,15 @@ class PortfolioManager:
             positions=self._positions,
         )
 
+    def available_cash(self) -> float:
+        """Gibt das aktuell verfügbare Kapital (Cash) zurück.
+
+        Zentrale Abfragestelle für Kapitalprüfungen (z. B. durch den
+        `TradingOrchestrator` vor einer Order-Erstellung).
+        """
+
+        return self._capital
+
     def apply_trade(
         self,
         symbol: str,
