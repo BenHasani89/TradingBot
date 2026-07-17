@@ -1,6 +1,12 @@
 """Datenmodelle für das Portfolio-System."""
 
 from dataclasses import dataclass
+from typing import Literal
+
+TradeSide = Literal["BUY", "SELL"]
+"""Handelsrichtung eines gebuchten Trades - bewusst unabhängig von
+`execution.models.OrderSide` definiert, damit das Portfolio-System nicht vom
+Ausführungssystem (Broker) abhängt."""
 
 
 @dataclass

@@ -18,3 +18,8 @@ class MarketDataStore:
     def all(self) -> list[MarketCandle]:
         """Gibt alle gespeicherten Kerzen zurück."""
         return self._candles
+
+    def latest(self, symbol: str, limit: int) -> list[MarketCandle]:
+        """Gibt die letzten `limit` Kerzen für `symbol` zurück (chronologisch)."""
+        matching = [candle for candle in self._candles if candle.symbol == symbol]
+        return matching[-limit:]
