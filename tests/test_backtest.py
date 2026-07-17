@@ -1,9 +1,18 @@
+import math
+import statistics
 from datetime import UTC, datetime
 
 import pytest
 
 from tradingbot.backtest.engine import BacktestEngine
-from tradingbot.backtest.metrics import max_drawdown_percent, performance_percent
+from tradingbot.backtest.metrics import (
+    annualized_return_percent,
+    calmar_ratio,
+    max_drawdown_percent,
+    performance_percent,
+    sharpe_ratio,
+    volatility_percent,
+)
 from tradingbot.backtest.models import EquityPoint
 from tradingbot.core.engine import TradingEngine
 from tradingbot.core.orchestrator import TradingOrchestrator
@@ -143,3 +152,150 @@ def test_max_drawdown_percent_computes_largest_decline():
 def test_max_drawdown_percent_empty_curve_is_zero():
 
     assert max_drawdown_percent([]) == 0.0
+
+
+def test_volatility_percent_known_series():
+
+    now = datetime.now(UTC)
+    curve = [
+        EquityPoint(timestamp=now, total_value=100.0),
+        EquityPoint(timestamp=now, total_value=110.0),
+        EquityPoint(timestamp=now, total_value=99.0),
+    ]
+    # Renditen: +0.10, -0.10 (exakt, da 110 * 0.9 = 99) -> Stichproben-
+    # Standardabweichung unabhaengig von der Produktionsfunktion nachgerechnet.
+    expected = math.sqrt(0.02) * 100
+
+    assert volatility_percent(curve, periods_per_year=1) == pytest.approx(expected)
+
+
+def test_volatility_percent_too_few_points_is_zero():
+
+    now = datetime.now(UTC)
+    curve = [EquityPoint(timestamp=now, total_value=100.0)]
+
+    assert volatility_percent(curve, periods_per_year=252) == 0.0
+    assert volatility_percent([], periods_per_year=252) == 0.0
+
+
+def test_sharpe_ratio_known_series():
+
+    now = datetime.now(UTC)
+    values = [100.0, 120.0, 108.0, 118.8]
+    curve = [EquityPoint(timestamp=now, total_value=v) for v in values]
+    returns = [
+        (values[i] - values[i - 1]) / values[i - 1] for i in range(1, len(values))
+    ]
+    expected = statistics.mean(returns) / statistics.stdev(returns) * math.sqrt(1)
+
+    assert sharpe_ratio(curve, periods_per_year=1) == pytest.approx(expected)
+
+
+def test_sharpe_ratio_zero_volatility_is_zero():
+
+    now = datetime.now(UTC)
+    # Jede Periode exakt +10% -> keine Schwankung der Renditen.
+    curve = [
+        EquityPoint(timestamp=now, total_value=100.0),
+        EquityPoint(timestamp=now, total_value=110.0),
+        EquityPoint(timestamp=now, total_value=121.0),
+        EquityPoint(timestamp=now, total_value=133.1),
+    ]
+
+    assert sharpe_ratio(curve, periods_per_year=1) == 0.0
+
+
+def test_sharpe_ratio_too_few_points_is_zero():
+
+    now = datetime.now(UTC)
+    curve = [EquityPoint(timestamp=now, total_value=100.0)]
+
+    assert sharpe_ratio(curve, periods_per_year=252) == 0.0
+    assert sharpe_ratio([], periods_per_year=252) == 0.0
+
+
+def test_sharpe_ratio_risk_free_rate_lowers_ratio():
+
+    now = datetime.now(UTC)
+    values = [100.0, 120.0, 108.0, 118.8]
+    curve = [EquityPoint(timestamp=now, total_value=v) for v in values]
+
+    without_rf = sharpe_ratio(curve, periods_per_year=1, risk_free_rate=0.0)
+    with_rf = sharpe_ratio(curve, periods_per_year=1, risk_free_rate=0.05)
+
+    assert with_rf < without_rf
+
+
+def test_annualized_return_percent_matches_total_return_for_one_year():
+
+    now = datetime.now(UTC)
+    curve = [
+        EquityPoint(timestamp=now, total_value=1025.0),
+        EquityPoint(timestamp=now, total_value=1050.0),
+        EquityPoint(timestamp=now, total_value=1075.0),
+        EquityPoint(timestamp=now, total_value=1100.0),
+    ]
+
+    result = annualized_return_percent(curve, initial_capital=1000.0, periods_per_year=4)
+
+    assert result == pytest.approx(10.0)
+
+
+def test_annualized_return_percent_compounds_over_multiple_years():
+
+    now = datetime.now(UTC)
+    values = [1050, 1100, 1150, 1200, 1205, 1207, 1209, 1210]
+    curve = [EquityPoint(timestamp=now, total_value=float(v)) for v in values]
+
+    # 8 Perioden bei periods_per_year=4 -> 2 Jahre; Gesamtrendite 21% -> 10% p.a.
+    result = annualized_return_percent(curve, initial_capital=1000.0, periods_per_year=4)
+
+    assert result == pytest.approx(10.0, rel=1e-6)
+
+
+def test_annualized_return_percent_empty_curve_is_zero():
+
+    assert annualized_return_percent([], initial_capital=1000.0, periods_per_year=252) == 0.0
+
+
+def test_calmar_ratio_correct():
+
+    now = datetime.now(UTC)
+    curve = [
+        EquityPoint(timestamp=now, total_value=1000.0),
+        EquityPoint(timestamp=now, total_value=950.0),
+        EquityPoint(timestamp=now, total_value=1100.0),
+    ]
+
+    # 1 Jahr (3 Perioden, periods_per_year=3): Gesamtrendite 10% -> annualisiert 10%.
+    # Max Drawdown: (1000-950)/1000 = 5%. Calmar = 10/5 = 2.0.
+    result = calmar_ratio(curve, initial_capital=1000.0, periods_per_year=3)
+
+    assert result == pytest.approx(2.0)
+
+
+def test_calmar_ratio_no_drawdown_with_positive_return_is_infinite():
+
+    now = datetime.now(UTC)
+    curve = [
+        EquityPoint(timestamp=now, total_value=1000.0),
+        EquityPoint(timestamp=now, total_value=1050.0),
+        EquityPoint(timestamp=now, total_value=1100.0),
+    ]
+
+    result = calmar_ratio(curve, initial_capital=1000.0, periods_per_year=3)
+
+    assert result == float("inf")
+
+
+def test_calmar_ratio_no_drawdown_no_return_is_zero():
+
+    now = datetime.now(UTC)
+    curve = [
+        EquityPoint(timestamp=now, total_value=1000.0),
+        EquityPoint(timestamp=now, total_value=1000.0),
+    ]
+
+    result = calmar_ratio(curve, initial_capital=1000.0, periods_per_year=2)
+
+    assert result == 0.0

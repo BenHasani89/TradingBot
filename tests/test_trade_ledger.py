@@ -4,8 +4,10 @@ import pytest
 
 from tradingbot.backtest.trade_ledger import (
     average_loss,
+    average_trade,
     average_win,
     extract_closed_trades,
+    payoff_ratio,
     profit_factor,
     win_rate_percent,
 )
@@ -261,3 +263,38 @@ def test_profit_factor_no_losses_is_infinite():
 def test_profit_factor_empty_is_zero():
 
     assert profit_factor([]) == 0.0
+
+
+def test_average_trade_correct():
+
+    trades = [_trade(50.0), _trade(-20.0), _trade(30.0), _trade(-10.0)]
+
+    assert average_trade(trades) == pytest.approx(12.5)  # (50-20+30-10)/4
+
+
+def test_average_trade_empty_is_zero():
+
+    assert average_trade([]) == 0.0
+
+
+def test_payoff_ratio_correct():
+
+    trades = [_trade(60.0), _trade(-20.0), _trade(30.0), _trade(-10.0)]
+    # average_win = (60+30)/2 = 45, average_loss = (-20-10)/2 = -15
+    # payoff_ratio = 45 / 15 = 3.0
+
+    assert payoff_ratio(trades) == pytest.approx(3.0)
+
+
+def test_payoff_ratio_no_losses_is_infinite():
+
+    trades = [_trade(50.0), _trade(30.0)]
+
+    assert payoff_ratio(trades) == float("inf")
+
+
+def test_payoff_ratio_no_wins_is_zero():
+
+    trades = [_trade(-10.0), _trade(-20.0)]
+
+    assert payoff_ratio(trades) == 0.0

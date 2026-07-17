@@ -65,3 +65,31 @@ def profit_factor(trades: list[ClosedTrade]) -> float:
         return float("inf") if gross_profit > 0.0 else 0.0
 
     return gross_profit / gross_loss
+
+
+def average_trade(trades: list[ClosedTrade]) -> float:
+    """Durchschnittliches Ergebnis über alle abgeschlossenen Trades
+    (Gewinne und Verluste zusammen). `0.0` bei leerer Liste.
+    """
+
+    if not trades:
+        return 0.0
+
+    return sum(trade.profit_loss for trade in trades) / len(trades)
+
+
+def payoff_ratio(trades: list[ClosedTrade]) -> float:
+    """Verhältnis von durchschnittlichem Gewinn zu durchschnittlichem
+    Verlust (als Betrag) - die Trade-Ebene des Risiko/Rendite-Verhältnisses.
+
+    Gibt `float('inf')` zurück, wenn es Gewinne, aber keine Verluste gibt,
+    und `0.0`, wenn es keine Gewinne gibt.
+    """
+
+    win = average_win(trades)
+    loss = average_loss(trades)
+
+    if loss == 0.0:
+        return float("inf") if win > 0.0 else 0.0
+
+    return win / abs(loss)
