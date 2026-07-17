@@ -1,9 +1,4 @@
-"""Trading-Kern: Ablaufsteuerung und Zustandsverwaltung des Bots.
-
-Enthaelt bewusst keine Boersen-Anbindung und loest keine Trades aus - das ist
-Aufgabe spaeterer Module (Ausfuehrungssystem, Strategie-System). Diese
-Komponente kennt nur den Aktiv-Status des Bots selbst.
-"""
+"""Trading-Kern: Ablaufsteuerung und Zustandsverwaltung."""
 
 from __future__ import annotations
 
@@ -12,47 +7,46 @@ from typing import Literal, TypedDict
 
 from loguru import logger
 
+from tradingbot.config.settings import MODE
+
 Modus = Literal["paper_trading"]
 
 
 class EngineStatus(TypedDict):
-    """Rueckgabetyp von :meth:`TradingEngine.status`."""
-
     running: bool
     started_at: datetime | None
     mode: Modus
 
 
 class TradingEngine:
-    """Zentrale Ablaufsteuerung des Trading-Bots.
-
-    Verwaltet ausschliesslich, ob der Bot aktiv ist und seit wann. Arbeitet
-    aktuell nur im Modus ``paper_trading``.
-    """
+    """Zentrale Ablaufsteuerung des Trading-Bots."""
 
     def __init__(self) -> None:
-        self._running: bool = False
+        self._running = False
         self._started_at: datetime | None = None
-        self._mode: Modus = "paper_trading"
+        self._mode: Modus = MODE
 
     def start(self) -> None:
-        """Setzt den Bot auf aktiv und speichert den Startzeitpunkt."""
+        """Startet die Engine."""
+
         self._running = True
         self._started_at = datetime.now(UTC)
-        logger.info("Trading-Engine gestartet (Modus: {})", self._mode)
+
+        logger.info(
+            "Trading-Engine gestartet (Modus: {})",
+            self._mode,
+        )
 
     def stop(self) -> None:
-        """Setzt den Bot auf inaktiv."""
+        """Stoppt die Engine."""
+
         self._running = False
+
         logger.info("Trading-Engine gestoppt")
 
     def status(self) -> EngineStatus:
-        """Gibt den aktuellen Status der Engine zurueck.
+        """Gibt den aktuellen Status zurück."""
 
-        Returns:
-            Dictionary mit den Schluesseln ``running``, ``started_at`` und
-            ``mode``.
-        """
         return {
             "running": self._running,
             "started_at": self._started_at,
