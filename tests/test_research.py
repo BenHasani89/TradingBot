@@ -1,5 +1,6 @@
 import pytest
 
+from tradingbot.backtest.models import BacktestResult
 from tradingbot.backtest.research import BacktestResearchRunner
 from tradingbot.data.models import MarketCandle
 from tradingbot.data.simulated_provider import SimulatedDataProvider
@@ -109,3 +110,77 @@ def test_research_runner_does_not_share_portfolio_state_between_strategies():
     assert hold_row.profit_loss == 0.0
     assert hold_row.performance_percent == 0.0
     assert hold_row.max_drawdown_percent == 0.0
+
+
+def test_run_raw_returns_full_backtest_results():
+
+    runner = BacktestResearchRunner(
+        candles=_candles(seed=1, limit=10),
+        initial_capital=10000.0,
+        risk_limit=1000.0,
+    )
+
+    results = runner.run_raw(
+        {
+            "BuyAndHold": BuyAndHoldStrategy(symbol="BTCUSDT"),
+            "AlwaysHold": _AlwaysHoldStrategy(),
+        }
+    )
+
+    assert set(results.keys()) == {"BuyAndHold", "AlwaysHold"}
+    assert isinstance(results["BuyAndHold"], BacktestResult)
+    assert results["BuyAndHold"].trades == 1
+    assert results["AlwaysHold"].trades == 0
+    # run_raw() liefert - anders als run() - die vollen Rohdaten.
+    assert len(results["BuyAndHold"].equity_curve) > 0
+    assert len(results["BuyAndHold"].cycle_results) > 0
+
+
+def test_run_uses_run_raw_internally_and_behaves_unchanged():
+
+    runner = BacktestResearchRunner(
+        candles=_candles(seed=3, limit=20),
+        initial_capital=10000.0,
+        risk_limit=1000.0,
+    )
+
+    raw_results = runner.run_raw(
+        {
+            "BuyAndHold": BuyAndHoldStrategy(symbol="BTCUSDT"),
+            "AlwaysHold": _AlwaysHoldStrategy(),
+        }
+    )
+    # Frische Instanzen, da Strategien internen Zustand tragen koennen.
+    comparison_rows = runner.run(
+        {
+            "BuyAndHold": BuyAndHoldStrategy(symbol="BTCUSDT"),
+            "AlwaysHold": _AlwaysHoldStrategy(),
+        }
+    )
+
+    by_name = {row.strategy_name: row for row in comparison_rows}
+    assert by_name["BuyAndHold"].trades == raw_results["BuyAndHold"].trades
+    assert by_name["BuyAndHold"].profit_loss == pytest.approx(
+        raw_results["BuyAndHold"].profit_loss
+    )
+    assert by_name["AlwaysHold"].trades == raw_results["AlwaysHold"].trades
+
+
+def test_run_raw_isolates_portfolio_state_between_strategies():
+
+    runner = BacktestResearchRunner(
+        candles=_candles(seed=5, limit=20),
+        initial_capital=10000.0,
+        risk_limit=1000.0,
+    )
+
+    results = runner.run_raw(
+        {
+            "AktivMovingAverage": MovingAverageCrossoverStrategy(short_window=2, long_window=5),
+            "ImmerHalten": _AlwaysHoldStrategy(),
+        }
+    )
+
+    hold_result = results["ImmerHalten"]
+    assert hold_result.trades == 0
+    assert hold_result.profit_loss == 0.0

@@ -41,8 +41,10 @@ class BacktestResearchRunner:
         self._initial_capital = initial_capital
         self._risk_limit = risk_limit
 
-    def run(self, strategies: dict[str, Strategy]) -> list[ComparisonRow]:
-        """Führt für jede Strategie einen eigenen, isolierten Backtest aus.
+    def run_raw(self, strategies: dict[str, Strategy]) -> dict[str, BacktestResult]:
+        """Führt für jede Strategie einen eigenen, isolierten Backtest aus und
+        gibt die vollständigen `BacktestResult`-Objekte zurück (inkl.
+        `equity_curve`/`cycle_results`).
 
         Args:
             strategies: Zuordnung von Strategie-Name zu Strategie-Instanz.
@@ -51,8 +53,8 @@ class BacktestResearchRunner:
                 Zustand über mehrere `analyze()`-Aufrufe hinweg führen.
 
         Returns:
-            Eine Vergleichszeile je Strategie (über `compare_strategies()`),
-            in derselben Reihenfolge wie `strategies`.
+            Zuordnung von Strategie-Name zu `BacktestResult`, in derselben
+            Reihenfolge wie `strategies`.
         """
 
         symbol = self._candles[0].symbol if self._candles else "UNKNOWN"
@@ -78,4 +80,20 @@ class BacktestResearchRunner:
 
             results[name] = backtest.run()
 
-        return compare_strategies(results)
+        return results
+
+    def run(self, strategies: dict[str, Strategy]) -> list[ComparisonRow]:
+        """Führt für jede Strategie einen eigenen, isolierten Backtest aus.
+
+        Args:
+            strategies: Zuordnung von Strategie-Name zu Strategie-Instanz.
+                Jede Instanz sollte frisch/unbenutzt übergeben werden, da
+                manche Strategien (z. B. `BuyAndHoldStrategy`) internen
+                Zustand über mehrere `analyze()`-Aufrufe hinweg führen.
+
+        Returns:
+            Eine Vergleichszeile je Strategie (über `compare_strategies()`),
+            in derselben Reihenfolge wie `strategies`.
+        """
+
+        return compare_strategies(self.run_raw(strategies))
