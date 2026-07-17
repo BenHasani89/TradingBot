@@ -11,6 +11,11 @@ from tradingbot.strategy.models import TradingSignal
 class Strategy(ABC):
     """Abstrakte Basis einer Strategie."""
 
+    @property
+    def name(self) -> str:
+        """Menschlich lesbarer Name der Strategie, Standard: Klassenname."""
+        return type(self).__name__
+
     @abstractmethod
     def analyze(
         self,
