@@ -83,6 +83,7 @@ class TradingOrchestrator:
                 decision=decision,
                 order=None,
                 execution=None,
+                closed_trade=None,
             )
 
         # Das Risiko-System lehnt HOLD-Signale immer ab (siehe RiskManager),
@@ -116,6 +117,7 @@ class TradingOrchestrator:
                     decision=decision,
                     order=None,
                     execution=None,
+                    closed_trade=None,
                 )
 
         order = Order(
@@ -126,6 +128,7 @@ class TradingOrchestrator:
         )
 
         execution = self._broker.execute(order)
+        closed_trade = None
 
         if execution.success:
             filled_order = execution.order
@@ -146,7 +149,7 @@ class TradingOrchestrator:
                 )
             effective_price = total_cash_impact / filled_order.quantity
 
-            self._portfolio.apply_trade(
+            closed_trade = self._portfolio.apply_trade(
                 symbol=filled_order.symbol,
                 side=filled_order.side,
                 quantity=filled_order.quantity,
@@ -168,4 +171,5 @@ class TradingOrchestrator:
             decision=decision,
             order=order,
             execution=execution,
+            closed_trade=closed_trade,
         )

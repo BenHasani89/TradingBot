@@ -1,6 +1,7 @@
 """Portfolio-Verwaltung des Trading-Bots."""
 
 from tradingbot.portfolio.models import (
+    ClosedTrade,
     PortfolioStatus,
     Position,
     TradeSide,
@@ -53,7 +54,7 @@ class PortfolioManager:
         side: TradeSide,
         quantity: float,
         price: float,
-    ) -> None:
+    ) -> ClosedTrade | None:
         """Bucht einen bereits ausgeführten Trade auf Kapital und Positionen.
 
         Neutral gegenüber dem Ausführungssystem: nimmt einfache Trade-Daten
@@ -64,18 +65,36 @@ class PortfolioManager:
 
         Bei BUY wird das Kapital um `quantity * price` reduziert und die
         Position angelegt bzw. per Mengen-gewichtetem Durchschnittspreis
-        erhöht. Bei SELL wird das Kapital entsprechend erhöht und die
-        bestehende Position reduziert bzw. bei vollständigem Verkauf entfernt.
-        Ein SELL ohne bestehende Position bucht nur das Kapital (kein
-        Leerverkauf-Tracking).
+        erhöht - `apply_trade` gibt in diesem Fall `None` zurück, da noch
+        nichts realisiert wurde. Bei SELL wird das Kapital entsprechend
+        erhöht und die bestehende Position reduziert bzw. bei vollständigem
+        Verkauf entfernt; der davor gültige Einstiegspreis wird gelesen und
+        als `ClosedTrade` mit dem realisierten Gewinn/Verlust zurückgegeben.
+        Ein SELL ohne bestehende Position bucht nur das Kapital und gibt
+        `None` zurück (kein Leerverkauf-Tracking).
+
+        `PortfolioManager` speichert dabei selbst keine Trade-Historie - das
+        Sammeln der zurückgegebenen `ClosedTrade`-Objekte ist Aufgabe der
+        aufrufenden Schicht (siehe `TradingOrchestrator`).
         """
 
         if side == "BUY":
             self._capital -= quantity * price
             self._increase_position(symbol, quantity, price)
-        else:
-            self._capital += quantity * price
-            self._decrease_position(symbol, quantity)
+            return None
+
+        self._capital += quantity * price
+        entry_price = self._decrease_position(symbol, quantity)
+        if entry_price is None:
+            return None
+
+        return ClosedTrade(
+            symbol=symbol,
+            quantity=quantity,
+            entry_price=entry_price,
+            exit_price=price,
+            profit_loss=(price - entry_price) * quantity,
+        )
 
     def _increase_position(
         self,
@@ -100,10 +119,16 @@ class PortfolioManager:
         self,
         symbol: str,
         quantity: float,
-    ) -> None:
+    ) -> float | None:
+        """Reduziert eine bestehende Position und gibt deren bisherigen
+        Einstiegspreis zurück (oder `None`, wenn keine Position existiert).
+        """
+
         for position in self._positions:
             if position.symbol == symbol:
+                entry_price = position.entry_price
                 position.quantity -= quantity
                 if position.quantity <= 0:
                     self._positions.remove(position)
-                return
+                return entry_price
+        return None

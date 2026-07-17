@@ -23,6 +23,23 @@ class Position:
 
 
 @dataclass
+class ClosedTrade:
+    """Ein abgeschlossener (realisierter) Trade.
+
+    Entsteht, wenn ein SELL eine bestehende Position ganz oder teilweise
+    reduziert. `quantity` ist die verkaufte Menge (nicht zwingend die
+    gesamte Positionsgrösse), `entry_price` der zum Verkaufszeitpunkt
+    gültige (mengengewichtete) Einstiegspreis der Position.
+    """
+
+    symbol: str
+    quantity: float
+    entry_price: float
+    exit_price: float
+    profit_loss: float
+
+
+@dataclass
 class PortfolioStatus:
     """Aktueller Zustand des Portfolios."""
 
