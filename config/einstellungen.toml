@@ -1,0 +1,17 @@
+# Versionierte Strategie- und Risiko-Parameter (keine Geheimnisse!).
+# Struktur-Platzhalter aus Phase 3 - finale Werte werden in Phase 5 (Strategie)
+# und Phase 6 (Backtesting) begruendet festgelegt.
+
+[risiko]
+# Platzhalter - Zielwerte fuer Risikoprofil "mittel" folgen in Phase 5
+risiko_pro_trade_prozent = 0.0
+max_offene_positionen = 0
+max_tagesverlust_prozent = 0.0
+
+[strategie]
+# Platzhalter - wird mit der ersten Strategie in Phase 5 befuellt
+aktive_strategie = ""
+
+[maerkte]
+krypto_symbole = []
+aktien_symbole = []

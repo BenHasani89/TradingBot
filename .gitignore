@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Secrets - niemals versionieren
+.env
+
+# Laufzeitdaten (nicht versioniert, siehe docs/phasen/03_entwicklungsumgebung.md)
+data/historisch/*
+!data/historisch/.gitkeep
+data/laufzeit/*
+!data/laufzeit/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# Test- und Tool-Caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
