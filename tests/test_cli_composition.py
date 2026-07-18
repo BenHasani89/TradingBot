@@ -3,6 +3,7 @@ import pytest
 from tradingbot.cli import composition
 from tradingbot.cli.config import RuntimeMode, build_config
 from tradingbot.execution.broker import PaperBroker
+from tradingbot.execution.live_broker import LiveBroker
 from tradingbot.execution.mock_broker import MockExecutionScenario, MockLiveBroker, MockOutcome
 from tradingbot.execution.models import OrderStatus
 from tradingbot.execution.persistence import SqliteOrderRepository
@@ -184,12 +185,76 @@ def test_build_engine_mock_mode_executes_trade_via_scenario(tmp_path):
     assert result.execution.success is True
 
 
-def test_build_engine_live_mode_raises_not_registered(tmp_path):
+def test_build_engine_live_mode_without_confirmation_raises(tmp_path, monkeypatch):
 
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_KEY", "key")
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_SECRET", "secret")
     config = _config(tmp_path, mode=RuntimeMode.LIVE)
 
-    with pytest.raises(ValueError, match="kein Broker"):
+    with pytest.raises(ValueError, match="Bestätigung"):
         composition.build_engine(config)
+
+
+def test_build_engine_live_mode_with_wrong_confirmation_raises(tmp_path, monkeypatch):
+
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_KEY", "key")
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_SECRET", "secret")
+    config = _config(tmp_path, mode=RuntimeMode.LIVE)
+
+    with pytest.raises(ValueError, match="Bestätigung"):
+        composition.build_engine(config, live_confirmation="yes please")
+
+
+def test_build_engine_live_mode_confirmed_but_missing_credentials_raises(tmp_path, monkeypatch):
+
+    monkeypatch.delenv("TRADINGBOT_LIVE_API_KEY", raising=False)
+    monkeypatch.delenv("TRADINGBOT_LIVE_API_SECRET", raising=False)
+    config = _config(tmp_path, mode=RuntimeMode.LIVE)
+
+    with pytest.raises(ValueError, match="TRADINGBOT_LIVE_API_KEY"):
+        composition.build_engine(
+            config, live_confirmation=composition.LIVE_CONFIRMATION_PHRASE
+        )
+
+
+def test_build_engine_live_mode_confirmed_with_credentials_builds_live_broker(
+    tmp_path, monkeypatch
+):
+
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_KEY", "key")
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_SECRET", "secret")
+    config = _config(tmp_path, mode=RuntimeMode.LIVE)
+
+    engine, _ = composition.build_engine(
+        config, live_confirmation=composition.LIVE_CONFIRMATION_PHRASE
+    )
+
+    assert isinstance(engine._orchestrator._broker, LiveBroker)
+
+
+def test_build_engine_live_mode_broker_cannot_execute_real_trades(tmp_path, monkeypatch):
+    """Selbst mit vollständiger Bestätigung + Credentials kann in dieser
+    Phase keine echte Order ausgeführt werden - kontrollierter
+    NotImplementedError, von der bestehenden Fehlerbehandlung abgefangen."""
+
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_KEY", "key")
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_SECRET", "secret")
+    config = _config(
+        tmp_path, session_id="session-1", candle_limit=5, mode=RuntimeMode.LIVE
+    )
+
+    engine, _ = composition.build_engine(
+        config, live_confirmation=composition.LIVE_CONFIRMATION_PHRASE
+    )
+    engine.start()
+
+    result = engine.run_cycle_once()
+
+    assert result is None  # CYCLE_ERROR abgefangen, kein Absturz
+    assert engine.health().last_error is not None
+    assert "NotImplementedError" in engine.health().last_error or "Exchange" in str(
+        engine.health().last_error
+    )
 
 
 def test_build_engine_paper_mode_ignores_scenario_provider(tmp_path):

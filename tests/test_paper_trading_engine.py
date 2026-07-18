@@ -8,11 +8,13 @@ from tradingbot.data.market import MarketDataStore
 from tradingbot.data.models import MarketCandle
 from tradingbot.data.provider import DataProvider
 from tradingbot.execution.broker import Broker, PaperBroker
-from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order
+from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order, OrderStatus
+from tradingbot.execution.order_repository import InMemoryOrderRepository, OrderRecord
 from tradingbot.paper_trading.audit import AuditEventType, SqliteAuditLog
 from tradingbot.paper_trading.engine import PaperTradingEngine
 from tradingbot.paper_trading.order_history import SqliteOrderHistory
 from tradingbot.paper_trading.persistence import SqliteSessionRepository
+from tradingbot.paper_trading.reconciliation import ReconciliationService
 from tradingbot.paper_trading.session import create_session
 from tradingbot.portfolio.manager import PortfolioManager
 from tradingbot.portfolio.persistence import SqlitePortfolioRepository
@@ -96,6 +98,7 @@ def _build_engine(
     initial_capital: float = 10000.0,
     strategy: Strategy | None = None,
     broker: Broker | None = None,
+    reconciliation_service=None,
 ):
     db_path = db_path if db_path is not None else str(tmp_path / "trading.sqlite3")
 
@@ -133,6 +136,7 @@ def _build_engine(
         max_exposure_percent=max_exposure_percent,
         max_exposure_per_asset_percent=max_exposure_per_asset_percent,
         now=clock,
+        reconciliation_service=reconciliation_service,
     )
     return engine, trading_engine, portfolio, db_path
 
@@ -196,6 +200,158 @@ def test_start_loads_previously_persisted_kill_switch(tmp_path):
     engine.start()
 
     assert engine.risk_guard.state.kill_switch_active is True
+
+
+# --- start(): Reconciliation-Mismatch bricht den Start ab --------------------------------------
+
+
+class _FixedStatusBroker(Broker):
+    """Beantwortet get_order_status() aus einer festen Zuordnung - für
+    Reconciliation-Tests, execute() wird hier nie gebraucht."""
+
+    def __init__(self, statuses: dict[str, ExecutionResult]) -> None:
+        self._statuses = statuses
+
+    def execute(self, order: Order) -> ExecutionResult:
+        raise NotImplementedError("Wird in diesen Tests nie aufgerufen")
+
+    def get_order_status(self, client_order_id: str) -> ExecutionResult | None:
+        return self._statuses.get(client_order_id)
+
+
+def _mismatched_reconciliation_service() -> ReconciliationService:
+    """Ein ReconciliationService, dessen einziger bekannter Order-Record
+    (SUBMITTED) laut Broker tatsächlich erfolgreich war - der klassische
+    Mismatch nach einem Absturz vor der Persistierung des Ergebnisses."""
+
+    repository = InMemoryOrderRepository()
+    order = Order(
+        symbol=SYMBOL, side="BUY", quantity=0.1, price=100.0, client_order_id="stuck-order"
+    )
+    repository.save(
+        OrderRecord(
+            client_order_id="stuck-order",
+            order=order,
+            status=OrderStatus.SUBMITTED,
+            created_at=datetime(2026, 7, 18, tzinfo=UTC),
+            updated_at=datetime(2026, 7, 18, tzinfo=UTC),
+        )
+    )
+    broker = _FixedStatusBroker(
+        {
+            "stuck-order": ExecutionResult(
+                success=True,
+                order=order,
+                message="Tatsächlich erfolgreich ausgeführt",
+                fee=0.0,
+                slippage=0.0,
+                status=ExecutionStatus.SUCCESS,
+                broker_order_id="stuck-order",
+            )
+        }
+    )
+    return ReconciliationService(broker=broker, order_repository=repository)
+
+
+def test_start_without_reconciliation_service_behaves_unchanged(tmp_path):
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    engine, trading_engine, _, _ = _build_engine(tmp_path, _FixedCandleProvider([]), clock)
+
+    engine.start()
+
+    assert trading_engine.status()["running"] is True
+
+
+def test_start_with_reconciliation_service_and_no_mismatches_succeeds(tmp_path):
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    service = ReconciliationService(
+        broker=PaperBroker(), order_repository=InMemoryOrderRepository()
+    )
+    engine, trading_engine, _, _ = _build_engine(
+        tmp_path, _FixedCandleProvider([]), clock, reconciliation_service=service
+    )
+
+    engine.start()
+
+    assert trading_engine.status()["running"] is True
+
+
+def test_start_aborts_with_runtime_error_on_reconciliation_mismatch(tmp_path):
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    engine, trading_engine, _, _ = _build_engine(
+        tmp_path,
+        _FixedCandleProvider([]),
+        clock,
+        reconciliation_service=_mismatched_reconciliation_service(),
+    )
+
+    with pytest.raises(RuntimeError, match="Reconciliation"):
+        engine.start()
+
+    assert trading_engine.status()["running"] is False
+
+
+def test_start_activates_kill_switch_on_reconciliation_mismatch(tmp_path):
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    engine, _, _, _ = _build_engine(
+        tmp_path,
+        _FixedCandleProvider([]),
+        clock,
+        reconciliation_service=_mismatched_reconciliation_service(),
+    )
+
+    with pytest.raises(RuntimeError):
+        engine.start()
+
+    assert engine.risk_guard.state.kill_switch_active is True
+    assert "Reconciliation-Mismatch" in engine.risk_guard.state.kill_switch_reason
+
+
+def test_start_persists_kill_switch_before_raising_survives_restart(tmp_path):
+    """Der Kill-Switch darf einen Neustart nicht ungespeichert überstehen -
+    eine unabhängig geladene RiskState-Kopie muss ihn nach dem
+    abgebrochenen start() bereits sehen."""
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    db_path = str(tmp_path / "trading.sqlite3")
+    engine, _, _, _ = _build_engine(
+        tmp_path,
+        _FixedCandleProvider([]),
+        clock,
+        db_path=db_path,
+        reconciliation_service=_mismatched_reconciliation_service(),
+    )
+
+    with pytest.raises(RuntimeError):
+        engine.start()
+
+    persisted = SqliteRiskStateRepository(db_path).load("session-1")
+    assert persisted is not None
+    assert persisted.kill_switch_active is True
+
+
+def test_start_writes_reconciliation_mismatch_audit_event(tmp_path):
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    db_path = str(tmp_path / "trading.sqlite3")
+    engine, _, _, _ = _build_engine(
+        tmp_path,
+        _FixedCandleProvider([]),
+        clock,
+        db_path=db_path,
+        reconciliation_service=_mismatched_reconciliation_service(),
+    )
+
+    with pytest.raises(RuntimeError):
+        engine.start()
+
+    events = SqliteAuditLog(db_path).for_session("session-1")
+    assert any(e.event_type == AuditEventType.RECONCILIATION_MISMATCH for e in events)
+    assert not any(e.event_type == AuditEventType.SESSION_STARTED for e in events)
 
 
 # --- run_cycle_once(): Blockade-Fälle ohne Orchestrator-Aufruf --------------------------------

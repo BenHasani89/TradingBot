@@ -28,6 +28,13 @@ _EXPECTED_LOCAL_STATUS_FOR_BROKER_STATUS = {
 `OrderStatus` ein bestimmter Broker-`ExecutionStatus` erwarten lässt, wenn
 lokaler und Broker-Zustand übereinstimmen."""
 
+_PENDING_STATUSES = {OrderStatus.CREATED, OrderStatus.SUBMITTED, OrderStatus.UNKNOWN}
+"""Status, die noch kein vom Broker direkt bestätigtes Endergebnis tragen -
+`FILLED`/`FAILED` kamen bereits als definitive Antwort auf einen
+`execute()`-Aufruf zustande und werden von `reconcile_pending()` deshalb
+nicht erneut abgefragt (spart Broker-Anfragen, siehe Rate-Limiting in
+`execution/live_broker.py`)."""
+
 
 @dataclass
 class ReconciliationResult:
@@ -53,11 +60,16 @@ class ReconciliationService:
     hängengebliebene Orders, deren wahrer Ausgang lokal nie ankam.
 
     Verändert weder lokalen noch Broker-seitigen Zustand (reine Prüfung,
-    keine Korrektur). Abhängigkeiten ausschliesslich per Injection - keine
-    direkte SQLite-Verbindung, keine Kenntnis von Session-, Portfolio- oder
-    Risk-Konzepten. In dieser Phase bewusst noch nicht in
-    `PaperTradingEngine` verdrahtet - reine Vorbereitung, die spätere
-    Scheduler-Kadenz/CLI-Anbindung folgt in einer eigenen Runtime-Phase.
+    keine Korrektur - keine automatische Portfolio-Korrektur, kein Replay).
+    Abhängigkeiten ausschliesslich per Injection - keine direkte SQLite-
+    Verbindung, keine Kenntnis von Session-, Portfolio- oder Risk-Konzepten.
+
+    `PaperTradingEngine.start()` ruft `reconcile_pending()` auf und
+    reagiert selbst auf das Ergebnis (Kill-Switch, Audit-Event, Start-
+    Abbruch bei Mismatch) - diese Klasse liefert nur die Vergleichsdaten,
+    die Eskalation bleibt bewusst ausserhalb. Eine laufende (nicht nur
+    Start-)Kadenz sowie CLI-Anbindung bleiben einer eigenen, späteren
+    Runtime-Phase vorbehalten.
     """
 
     def __init__(self, broker: Broker, order_repository: OrderRepository) -> None:
@@ -126,4 +138,22 @@ class ReconciliationService:
         return [
             self.reconcile_order(record.client_order_id)
             for record in self._order_repository.all()
+        ]
+
+    def reconcile_pending(self) -> list[ReconciliationResult]:
+        """Vergleicht nur Orders ohne bereits vom Broker bestätigtes
+        Endergebnis (`CREATED`/`SUBMITTED`/`UNKNOWN`, siehe
+        `_PENDING_STATUSES`).
+
+        Für einen Session-Neustart relevant: eine Order, die vor einem
+        Absturz `SUBMITTED` blieb, ist genau der Fall, den diese Methode
+        prüft - eine bereits `FILLED`/`FAILED` gebuchte Order kam direkt
+        vom `execute()`-Aufruf und muss nicht erneut beim Broker
+        nachgefragt werden.
+        """
+
+        return [
+            self.reconcile_order(record.client_order_id)
+            for record in self._order_repository.all()
+            if record.status in _PENDING_STATUSES
         ]

@@ -196,3 +196,62 @@ def test_reconcile_all_with_no_local_orders_returns_empty_list():
     service = _service(InMemoryOrderRepository(), broker_statuses={})
 
     assert service.reconcile_all() == []
+
+
+# --- reconcile_pending() ---------------------------------------------------------------------
+
+
+def test_reconcile_pending_skips_already_terminal_orders():
+    """FILLED/FAILED kamen direkt von execute() - reconcile_pending() darf
+    sie nicht erneut beim Broker abfragen (Rate-Limit-Rücksicht)."""
+
+    repository = InMemoryOrderRepository()
+    repository.save(_local_record("order-1", OrderStatus.FILLED))
+    repository.save(_local_record("order-2", OrderStatus.FAILED))
+    broker = _FakeStatusBroker(
+        {
+            "order-1": _broker_result("order-1", ExecutionStatus.SUCCESS),
+            "order-2": _broker_result("order-2", ExecutionStatus.FAILED),
+        }
+    )
+    service = ReconciliationService(broker=broker, order_repository=repository)
+
+    results = service.reconcile_pending()
+
+    assert results == []
+
+
+def test_reconcile_pending_covers_created_submitted_and_unknown():
+
+    repository = InMemoryOrderRepository()
+    repository.save(_local_record("order-created", OrderStatus.CREATED))
+    repository.save(_local_record("order-submitted", OrderStatus.SUBMITTED))
+    repository.save(_local_record("order-unknown", OrderStatus.UNKNOWN))
+    repository.save(_local_record("order-filled", OrderStatus.FILLED))
+    service = _service(
+        repository,
+        broker_statuses={
+            "order-created": _broker_result("order-created", ExecutionStatus.SUCCESS),
+            "order-submitted": _broker_result("order-submitted", ExecutionStatus.SUCCESS),
+            "order-unknown": _broker_result("order-unknown", ExecutionStatus.UNKNOWN),
+        },
+    )
+
+    results = service.reconcile_pending()
+
+    assert {r.client_order_id for r in results} == {
+        "order-created",
+        "order-submitted",
+        "order-unknown",
+    }
+
+
+def test_reconcile_pending_with_no_pending_orders_returns_empty_list():
+
+    repository = InMemoryOrderRepository()
+    repository.save(_local_record("order-1", OrderStatus.FILLED))
+    service = _service(
+        repository, broker_statuses={"order-1": _broker_result("order-1", ExecutionStatus.SUCCESS)}
+    )
+
+    assert service.reconcile_pending() == []

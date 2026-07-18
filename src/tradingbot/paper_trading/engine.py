@@ -24,6 +24,7 @@ from tradingbot.data.provider import DataProvider
 from tradingbot.paper_trading.audit import AuditEventType, SqliteAuditLog
 from tradingbot.paper_trading.health import HealthSnapshot, build_health_snapshot
 from tradingbot.paper_trading.order_history import OrderExecution, SqliteOrderHistory
+from tradingbot.paper_trading.reconciliation import ReconciliationResult, ReconciliationService
 from tradingbot.paper_trading.repository import SessionRepository
 from tradingbot.paper_trading.session import SessionMetadata
 from tradingbot.portfolio.manager import PortfolioManager
@@ -80,6 +81,7 @@ class PaperTradingEngine:
         portfolio_id: str | None = None,
         risk_id: str | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        reconciliation_service: ReconciliationService | None = None,
     ) -> None:
         self._engine = engine
         self._provider = provider
@@ -92,6 +94,7 @@ class PaperTradingEngine:
         self._session_repository = session_repository
         self._audit_log = audit_log
         self._order_history = order_history
+        self._reconciliation_service = reconciliation_service
         self._symbol = symbol
         self._timeframe = timeframe
         self._candle_limit = candle_limit
@@ -137,7 +140,23 @@ class PaperTradingEngine:
     def start(self) -> None:
         """Lädt Portfolio- und Risk-State (falls vorhanden), baut den
         `PortfolioRiskGuard` auf und startet die zugrunde liegende
-        `TradingEngine`."""
+        `TradingEngine`.
+
+        Ist ein `reconciliation_service` konfiguriert, wird davor
+        `reconcile_pending()` geprüft. Bei jedem erkannten Mismatch: der
+        Kill-Switch wird aktiviert und der resultierende `RiskState` sofort
+        persistiert (er darf einen Neustart nicht ungespeichert überstehen
+        - nur diese eine Aktion, keine automatische Portfolio-Korrektur,
+        kein Replay), ein `RECONCILIATION_MISMATCH`-Audit-Event wird
+        geschrieben, und `start()` bricht mit `RuntimeError` ab, *bevor*
+        `TradingEngine.start()` aufgerufen wird - kein Zyklus kann in einer
+        Session mit unaufgeklärter Order-Diskrepanz laufen. Auflösung
+        erfordert manuellen Eingriff (`PortfolioRiskGuard.
+        reset_kill_switch()`), kein automatischer Mechanismus dafür.
+
+        Raises:
+            RuntimeError: bei mindestens einem Reconciliation-Mismatch.
+        """
 
         portfolio_state = self._portfolio_repository.load(self._portfolio_id)
         if portfolio_state is not None:
@@ -161,6 +180,16 @@ class PaperTradingEngine:
             now=self._now,
         )
 
+        if self._reconciliation_service is not None:
+            mismatches = self._run_startup_reconciliation()
+            if mismatches:
+                raise RuntimeError(
+                    f"Session-Start abgebrochen: {len(mismatches)} Reconciliation-"
+                    f"Mismatch(es) erkannt (Session {self._session.session_id}). "
+                    "Kill-Switch aktiv und persistiert - manueller Eingriff "
+                    "erforderlich (siehe Audit-Log, PortfolioRiskGuard.reset_kill_switch())."
+                )
+
         self._session_repository.save(self._session)
         self._engine.start()
         self._audit_log.record(
@@ -170,6 +199,36 @@ class PaperTradingEngine:
             now=self._now(),
         )
         logger.info("Paper-Trading-Session gestartet: {}", self._session.session_id)
+
+    def _run_startup_reconciliation(self) -> list[ReconciliationResult]:
+        """Vergleicht offene Orders mit dem Broker, eskaliert jeden
+        Mismatch (Kill-Switch + Audit-Event) und gibt die gefundenen
+        Mismatches zurück - leer, wenn alles übereinstimmt."""
+
+        results = self._reconciliation_service.reconcile_pending()
+        mismatches = [result for result in results if not result.matched]
+
+        for mismatch in mismatches:
+            self._risk_guard.trigger_kill_switch(
+                f"Reconciliation-Mismatch bei Order {mismatch.client_order_id}: "
+                f"{mismatch.reason}"
+            )
+            self._audit_log.record(
+                self._session.session_id,
+                AuditEventType.RECONCILIATION_MISMATCH,
+                (
+                    f"{mismatch.client_order_id}: lokal="
+                    f"{mismatch.local_status.value if mismatch.local_status else None}, "
+                    f"broker={mismatch.broker_status.value if mismatch.broker_status else None} "
+                    f"- {mismatch.reason}"
+                ),
+                now=self._now(),
+            )
+
+        if mismatches:
+            self._risk_repository.save(self._risk_id, self._risk_guard.state)
+
+        return mismatches
 
     def run_cycle_once(self) -> TradingCycleResult | None:
         """Führt höchstens einen Trading-Zyklus aus.

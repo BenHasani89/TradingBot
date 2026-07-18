@@ -23,6 +23,7 @@ class AuditEventType(Enum):
     TRADE_BLOCKED = "trade_blocked"
     RISK_EVENT = "risk_event"
     CYCLE_ERROR = "cycle_error"
+    RECONCILIATION_MISMATCH = "reconciliation_mismatch"
 
 
 @dataclass

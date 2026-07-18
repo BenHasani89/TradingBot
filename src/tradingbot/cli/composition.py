@@ -7,6 +7,7 @@ zusammengesetzt werden. Kein anderes Modul (auch nicht `cli.commands` oder
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 
 from tradingbot.cli.config import RuntimeConfig, RuntimeMode
@@ -16,13 +17,16 @@ from tradingbot.core.orchestrator import TradingOrchestrator
 from tradingbot.data.market import MarketDataStore
 from tradingbot.data.simulated_provider import SimulatedDataProvider
 from tradingbot.execution.broker import Broker, PaperBroker
+from tradingbot.execution.live_broker import LiveBroker
 from tradingbot.execution.mock_broker import MockLiveBroker, ScenarioProvider
+from tradingbot.execution.order_repository import OrderRepository
 from tradingbot.execution.persistence import SqliteOrderRepository
 from tradingbot.paper_trading.audit import SqliteAuditLog
 from tradingbot.paper_trading.engine import PaperTradingEngine
 from tradingbot.paper_trading.health import HealthSnapshot, build_health_snapshot
 from tradingbot.paper_trading.order_history import SqliteOrderHistory
 from tradingbot.paper_trading.persistence import SqliteSessionRepository
+from tradingbot.paper_trading.reconciliation import ReconciliationService
 from tradingbot.paper_trading.scheduler import SimpleLoopScheduler
 from tradingbot.paper_trading.session import SessionMetadata, create_session
 from tradingbot.portfolio.manager import PortfolioManager
@@ -32,6 +36,15 @@ from tradingbot.risk.persistence import SqliteRiskStateRepository
 from tradingbot.strategy.base import Strategy
 from tradingbot.strategy.moving_average import MovingAverageCrossoverStrategy
 from tradingbot.strategy.simple import SimpleStrategy
+
+LIVE_CONFIRMATION_PHRASE = "I_UNDERSTAND_THIS_IS_REAL_MONEY"
+"""Exakte Zeichenkette, die `build_engine()` für `RuntimeMode.LIVE` als
+`live_confirmation` erwartet (statt eines einfachen Booleans) - schwerer
+versehentlich zu setzen, keine CLI-/Konfigurationsoption dafür (siehe
+`_build_live_broker`)."""
+
+_LIVE_API_KEY_ENV_VAR = "TRADINGBOT_LIVE_API_KEY"
+_LIVE_API_SECRET_ENV_VAR = "TRADINGBOT_LIVE_API_SECRET"  # noqa: S105 - Name der ENV-Variable, kein Geheimnis selbst
 
 _STRATEGIES: dict[str, type[Strategy]] = {
     "simple": SimpleStrategy,
@@ -50,12 +63,14 @@ def _build_strategy(name: str) -> Strategy:
 
 
 def _build_paper_broker(
-    config: RuntimeConfig, scenario_provider: ScenarioProvider | None
+    config: RuntimeConfig, scenario_provider: ScenarioProvider | None, live_confirmation: str | None
 ) -> Broker:
     return PaperBroker(fee_percent=config.fee_percent, slippage_percent=config.slippage_percent)
 
 
-def _build_mock_broker(config: RuntimeConfig, scenario_provider: ScenarioProvider | None) -> Broker:
+def _build_mock_broker(
+    config: RuntimeConfig, scenario_provider: ScenarioProvider | None, live_confirmation: str | None
+) -> Broker:
     if scenario_provider is None:
         raise ValueError(
             "RuntimeMode.MOCK erfordert einen scenario_provider - wird ausschliesslich "
@@ -65,45 +80,89 @@ def _build_mock_broker(config: RuntimeConfig, scenario_provider: ScenarioProvide
     return MockLiveBroker(scenario_provider=scenario_provider)
 
 
-# RuntimeMode.LIVE bewusst nicht registriert: es existiert noch kein LiveBroker.
-# Eine Auswahl von LIVE schlägt dadurch in _build_broker() mit einem klaren Fehler
-# fehl, statt still auf einen anderen Broker zurückzufallen oder echtes
-# Live-Trading zu ermöglichen.
-_BROKER_FACTORIES: dict[RuntimeMode, Callable[[RuntimeConfig, ScenarioProvider | None], Broker]] = {
+def _build_live_broker(
+    config: RuntimeConfig, scenario_provider: ScenarioProvider | None, live_confirmation: str | None
+) -> Broker:
+    """Baut einen `LiveBroker` - erst nach expliziter Bestätigung und nur
+    mit vollständigen Credentials.
+
+    `execute()`/`get_order_status()` des zurückgegebenen `LiveBroker` werfen
+    `NotImplementedError` (keine Exchange-Anbindung, siehe
+    `execution/live_broker.py`) - diese Factory stellt sicher, dass ein
+    `LiveBroker` überhaupt nur mit Bestätigung *und* Credentials entsteht,
+    unabhängig davon.
+    """
+
+    if live_confirmation != LIVE_CONFIRMATION_PHRASE:
+        raise ValueError(
+            "RuntimeMode.LIVE erfordert eine explizite Bestätigung - "
+            f"live_confirmation muss exakt {LIVE_CONFIRMATION_PHRASE!r} sein. "
+            "Keine CLI-/Konfigurationsoption dafür, ausschliesslich programmatisch."
+        )
+
+    api_key = os.environ.get(_LIVE_API_KEY_ENV_VAR)
+    api_secret = os.environ.get(_LIVE_API_SECRET_ENV_VAR)
+    if not api_key or not api_secret:
+        raise ValueError(
+            f"RuntimeMode.LIVE erfordert die Umgebungsvariablen {_LIVE_API_KEY_ENV_VAR!r} "
+            f"und {_LIVE_API_SECRET_ENV_VAR!r} - mindestens eine davon ist nicht gesetzt. "
+            "Credentials werden nie in RuntimeConfig/Config-Dateien gespeichert."
+        )
+
+    return LiveBroker(api_key=api_key, api_secret=api_secret)
+
+
+# RuntimeMode.LIVE ist registriert, damit das vollständige Sicherheits-Gate
+# (Bestätigungsphrase + Credential-Prüfung) end-to-end testbar ist - der
+# zurückgegebene LiveBroker kann aber keine echte Order ausführen
+# (NotImplementedError, siehe execution/live_broker.py). Kein Rückfall auf
+# einen anderen Broker, kein stilles Umschalten.
+_BROKER_FACTORIES: dict[
+    RuntimeMode, Callable[[RuntimeConfig, ScenarioProvider | None, str | None], Broker]
+] = {
     RuntimeMode.PAPER: _build_paper_broker,
     RuntimeMode.MOCK: _build_mock_broker,
+    RuntimeMode.LIVE: _build_live_broker,
 }
 
 
-def _build_broker(config: RuntimeConfig, scenario_provider: ScenarioProvider | None) -> Broker:
+def _build_broker(
+    config: RuntimeConfig, scenario_provider: ScenarioProvider | None, live_confirmation: str | None
+) -> Broker:
     try:
         factory = _BROKER_FACTORIES[config.mode]
     except KeyError:
         raise ValueError(
             f"RuntimeMode {config.mode.value!r} ist architektonisch vorbereitet, aber "
-            "noch kein Broker dafür registriert (kein LiveBroker vorhanden)."
+            "noch kein Broker dafür registriert."
         ) from None
-    return factory(config, scenario_provider)
+    return factory(config, scenario_provider, live_confirmation)
 
 
 def build_engine(
-    config: RuntimeConfig, scenario_provider: ScenarioProvider | None = None
+    config: RuntimeConfig,
+    scenario_provider: ScenarioProvider | None = None,
+    live_confirmation: str | None = None,
 ) -> tuple[PaperTradingEngine, SimpleLoopScheduler]:
     """Baut den vollständigen Objektgraphen für eine neue Paper-Trading-Session.
 
     `scenario_provider` ist ausschliesslich für `RuntimeMode.MOCK` relevant
-    und wird nie aus `config` abgeleitet - reine Python-Übergabe, keine
-    CLI-Konfiguration (siehe `_build_mock_broker`).
+    (siehe `_build_mock_broker`), `live_confirmation` ausschliesslich für
+    `RuntimeMode.LIVE` (siehe `_build_live_broker`, `LIVE_CONFIRMATION_PHRASE`).
+    Beide werden nie aus `config` abgeleitet - reine Python-Übergabe, keine
+    CLI-Konfiguration.
     """
 
     trading_engine = TradingEngine()
     portfolio = PortfolioManager(initial_capital=config.initial_capital)
+    broker = _build_broker(config, scenario_provider, live_confirmation)
+    order_repository: OrderRepository = SqliteOrderRepository(config.db_path)
     orchestrator = TradingOrchestrator(
         engine=trading_engine,
         strategy=_build_strategy(config.strategy_name),
         risk_manager=RiskManager(max_position_size=config.max_position_size),
         portfolio=portfolio,
-        broker=_build_broker(config, scenario_provider),
+        broker=broker,
         # Unabhängig vom gewählten Broker aus denselben Werten wie oben -
         # TradingOrchestrator liest Fee/Slippage nicht mehr vom Broker selbst
         # (siehe core/orchestrator.py, core/models.py::ExecutionCostEstimate).
@@ -115,7 +174,7 @@ def build_engine(
         # `TradingOrchestrator` ohne `order_repository` verwendet und dadurch
         # automatisch beim In-Memory-Standard bleibt (siehe
         # `core/orchestrator.py`).
-        order_repository=SqliteOrderRepository(config.db_path),
+        order_repository=order_repository,
     )
 
     session = create_session(
@@ -123,6 +182,13 @@ def build_engine(
     )
     if config.session_id is not None:
         session.session_id = config.session_id
+
+    # Derselbe broker/order_repository wie oben - Reconciliation muss gegen
+    # denselben Zustand prüfen, den TradingOrchestrator tatsächlich verwendet
+    # (siehe paper_trading/reconciliation.py).
+    reconciliation_service = ReconciliationService(
+        broker=broker, order_repository=order_repository
+    )
 
     engine = PaperTradingEngine(
         engine=trading_engine,
@@ -143,6 +209,7 @@ def build_engine(
         max_drawdown_percent=config.max_drawdown_percent,
         max_exposure_percent=config.max_exposure_percent,
         max_exposure_per_asset_percent=config.max_exposure_per_asset_percent,
+        reconciliation_service=reconciliation_service,
     )
 
     return engine, SimpleLoopScheduler()
