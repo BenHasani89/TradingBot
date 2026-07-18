@@ -109,3 +109,41 @@ class SqliteSessionRepository(SessionRepository):
             status=status,
             heartbeat_at=datetime.fromisoformat(heartbeat_at_text) if heartbeat_at_text else None,
         )
+
+    def all(self) -> list[SessionMetadata]:
+        """Gibt alle gespeicherten Sessions zurück, sortiert nach
+        `started_at` (älteste zuerst)."""
+
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT session_id, symbol, timeframe, strategy_name, started_at, "
+                "stopped_at, status, heartbeat_at FROM session ORDER BY started_at ASC"
+            ).fetchall()
+        finally:
+            connection.close()
+
+        return [
+            SessionMetadata(
+                session_id=session_id,
+                symbol=symbol,
+                timeframe=timeframe,
+                strategy_name=strategy_name,
+                started_at=datetime.fromisoformat(started_at_text),
+                stopped_at=datetime.fromisoformat(stopped_at_text) if stopped_at_text else None,
+                status=status,
+                heartbeat_at=(
+                    datetime.fromisoformat(heartbeat_at_text) if heartbeat_at_text else None
+                ),
+            )
+            for (
+                session_id,
+                symbol,
+                timeframe,
+                strategy_name,
+                started_at_text,
+                stopped_at_text,
+                status,
+                heartbeat_at_text,
+            ) in rows
+        ]

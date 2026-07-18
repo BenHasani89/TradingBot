@@ -65,3 +65,69 @@ def test_save_overwrites_previous_state_for_same_session_id(tmp_path):
     repository.save(updated)
 
     assert repository.load("session-1").status == "stopped"
+
+
+# --- all() ------------------------------------------------------------------------------------
+
+
+def test_all_without_any_saved_session_returns_empty_list(tmp_path):
+
+    assert _repository(tmp_path).all() == []
+
+
+def test_all_returns_every_saved_session(tmp_path):
+
+    repository = _repository(tmp_path)
+    first = _session()
+    second = SessionMetadata(
+        session_id="session-2",
+        symbol="ETHUSDT",
+        timeframe="1h",
+        strategy_name="SimpleStrategy",
+        started_at=datetime(2026, 7, 18, 13, tzinfo=UTC),
+    )
+    repository.save(first)
+    repository.save(second)
+
+    all_sessions = repository.all()
+
+    assert {s.session_id for s in all_sessions} == {"session-1", "session-2"}
+
+
+def test_all_is_ordered_by_started_at_ascending(tmp_path):
+
+    repository = _repository(tmp_path)
+    later = SessionMetadata(
+        session_id="later",
+        symbol="ETHUSDT",
+        timeframe="1h",
+        strategy_name="SimpleStrategy",
+        started_at=datetime(2026, 7, 19, tzinfo=UTC),
+    )
+    earlier = SessionMetadata(
+        session_id="earlier",
+        symbol="BTCUSDT",
+        timeframe="1h",
+        strategy_name="SimpleStrategy",
+        started_at=datetime(2026, 7, 17, tzinfo=UTC),
+    )
+    repository.save(later)
+    repository.save(earlier)
+
+    all_sessions = repository.all()
+
+    assert [s.session_id for s in all_sessions] == ["earlier", "later"]
+
+
+def test_all_reflects_overwrite_not_duplicate_entries(tmp_path):
+
+    repository = _repository(tmp_path)
+    repository.save(_session())
+    updated = _session()
+    updated.status = "stopped"
+    repository.save(updated)
+
+    all_sessions = repository.all()
+
+    assert len(all_sessions) == 1
+    assert all_sessions[0].status == "stopped"

@@ -27,3 +27,7 @@ class SessionRepository(ABC):
         Gibt `None` zurück, wenn für `session_id` noch nichts gespeichert
         wurde.
         """
+
+    @abstractmethod
+    def all(self) -> list[SessionMetadata]:
+        """Gibt alle gespeicherten Sessions zurück."""
