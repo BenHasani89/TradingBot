@@ -18,6 +18,9 @@ class _FixedResultBroker(Broker):
         self.calls += 1
         return self._result_factory(order)
 
+    def get_order_status(self, client_order_id: str) -> ExecutionResult | None:
+        return None
+
 
 class _FailingBroker(Broker):
     """Wirft bei jedem Aufruf - simuliert einen Broker-Fehler (z. B.
@@ -25,6 +28,9 @@ class _FailingBroker(Broker):
 
     def execute(self, order: Order) -> ExecutionResult:
         raise ConnectionError("Broker nicht erreichbar")
+
+    def get_order_status(self, client_order_id: str) -> ExecutionResult | None:
+        return None
 
 
 def _success_result(order: Order) -> ExecutionResult:

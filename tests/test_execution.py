@@ -77,3 +77,36 @@ def test_paper_broker_sets_status_success():
 def test_execution_status_has_exactly_three_values():
 
     assert {status.value for status in ExecutionStatus} == {"success", "failed", "unknown"}
+
+
+# --- get_order_status() ------------------------------------------------------------------
+
+
+def test_get_order_status_returns_none_for_unknown_client_order_id():
+
+    broker = PaperBroker()
+
+    assert broker.get_order_status("unknown-id") is None
+
+
+def test_get_order_status_returns_the_same_result_execute_returned():
+
+    broker = PaperBroker(slippage_percent=0.01, fee_percent=0.005)
+    order = Order(symbol="BTCUSDT", side="BUY", quantity=0.1, price=60000)
+
+    executed = broker.execute(order)
+    looked_up = broker.get_order_status(order.client_order_id)
+
+    assert looked_up == executed
+
+
+def test_get_order_status_is_independent_across_orders():
+
+    broker = PaperBroker()
+    first = Order(symbol="BTCUSDT", side="BUY", quantity=0.1, price=60000)
+    second = Order(symbol="ETHUSDT", side="SELL", quantity=1.0, price=3000)
+
+    broker.execute(first)
+
+    assert broker.get_order_status(first.client_order_id) is not None
+    assert broker.get_order_status(second.client_order_id) is None

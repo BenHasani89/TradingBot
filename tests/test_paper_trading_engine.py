@@ -79,6 +79,9 @@ class _FailingBroker(Broker):
     def execute(self, order: Order) -> ExecutionResult:
         raise RuntimeError("Broker nicht erreichbar")
 
+    def get_order_status(self, client_order_id: str) -> ExecutionResult | None:
+        return None
+
 
 def _build_engine(
     tmp_path,

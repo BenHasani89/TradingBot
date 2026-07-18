@@ -33,6 +33,16 @@ class Broker(ABC):
     def execute(self, order: Order) -> ExecutionResult:
         """Führt eine Order aus und liefert das Ergebnis."""
 
+    @abstractmethod
+    def get_order_status(self, client_order_id: str) -> ExecutionResult | None:
+        """Fragt den zuletzt bekannten Ausführungsstatus einer Order beim
+        Broker ab - unabhängig vom lokalen `OrderRepository`. Grundlage für
+        Order-Reconciliation (siehe `paper_trading/reconciliation.py`).
+
+        Gibt `None` zurück, wenn dem Broker diese `client_order_id`
+        unbekannt ist.
+        """
+
 
 class PaperBroker(Broker):
     """Simulierter Broker ohne echtes Geld.
@@ -50,6 +60,7 @@ class PaperBroker(Broker):
         self.orders: list[Order] = []
         self._fee_percent = fee_percent
         self._slippage_percent = slippage_percent
+        self._execution_results: dict[str, ExecutionResult] = {}
 
     @property
     def fee_percent(self) -> float:
@@ -92,7 +103,7 @@ class PaperBroker(Broker):
         )
         self.orders.append(filled_order)
 
-        return ExecutionResult(
+        result = ExecutionResult(
             success=True,
             order=filled_order,
             message="Paper Order ausgeführt",
@@ -101,8 +112,22 @@ class PaperBroker(Broker):
             status=ExecutionStatus.SUCCESS,
             broker_order_id=order.client_order_id,
         )
+        self._execution_results[order.client_order_id] = result
+        return result
 
     def history(self) -> list[Order]:
         """Gibt ausgeführte Orders zurück."""
 
         return self.orders
+
+    def get_order_status(self, client_order_id: str) -> ExecutionResult | None:
+        """Fragt den zuletzt bekannten Ausführungsstatus ab.
+
+        `PaperBroker` ist synchron und eindeutig: liefert für eine bekannte
+        `client_order_id` immer exakt das `ExecutionResult`, das
+        `execute()` bereits zurückgegeben hat - keine Ambiguität, kein
+        `UNKNOWN`. `None`, wenn diese `client_order_id` nie ausgeführt
+        wurde.
+        """
+
+        return self._execution_results.get(client_order_id)
