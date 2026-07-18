@@ -1,9 +1,13 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from tradingbot.execution.broker import Broker
 from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order, OrderStatus
 from tradingbot.execution.order_manager import OrderManager
 from tradingbot.execution.order_repository import InMemoryOrderRepository, OrderRecord
+
+_NOW = datetime(2026, 7, 18, 12, tzinfo=UTC)
 
 
 class _FixedResultBroker(Broker):
@@ -188,7 +192,11 @@ def test_duplicate_with_no_execution_result_yet_returns_unknown_without_calling_
     order = _order()
     repository.save(
         OrderRecord(
-            client_order_id=order.client_order_id, order=order, status=OrderStatus.SUBMITTED
+            client_order_id=order.client_order_id,
+            order=order,
+            status=OrderStatus.SUBMITTED,
+            created_at=_NOW,
+            updated_at=_NOW,
         )
     )
     manager = OrderManager(broker=broker, repository=repository)
@@ -211,3 +219,53 @@ def test_different_client_order_ids_both_execute():
 
     assert broker.calls == 2
     assert len(repository.all()) == 2
+
+
+# --- Zeitstempel (created_at/updated_at) ---------------------------------------------------
+
+
+class _Clock:
+
+    def __init__(self, current: datetime):
+        self.current = current
+
+    def __call__(self) -> datetime:
+        return self.current
+
+
+def test_submit_sets_created_at_and_updated_at_from_injected_clock():
+
+    clock = _Clock(_NOW)
+    broker = _FixedResultBroker(_success_result)
+    repository = InMemoryOrderRepository()
+    manager = OrderManager(broker=broker, repository=repository, now=clock)
+    order = _order()
+
+    manager.submit(order)
+
+    record = repository.get(order.client_order_id)
+    assert record.created_at == _NOW
+    assert record.updated_at == _NOW
+
+
+def test_created_at_stays_stable_while_updated_at_advances_within_one_submit():
+
+    clock = _Clock(_NOW)
+    broker = _FixedResultBroker(_success_result)
+    repository = InMemoryOrderRepository()
+    manager = OrderManager(broker=broker, repository=repository, now=clock)
+    order = _order()
+
+    later = datetime(2026, 7, 18, 12, 5, tzinfo=UTC)
+
+    def _advancing_broker_execute(order: Order) -> ExecutionResult:
+        clock.current = later
+        return _success_result(order)
+
+    broker.execute = _advancing_broker_execute  # simuliert Zeitverlauf während des Broker-Aufrufs
+
+    manager.submit(order)
+
+    record = repository.get(order.client_order_id)
+    assert record.created_at == _NOW
+    assert record.updated_at == later

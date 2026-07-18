@@ -10,6 +10,7 @@ Backtest-Läufe keine SQLite-Schreibvorgänge auslösen.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 
 from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order, OrderStatus
 from tradingbot.execution.order_repository import OrderRecord, OrderRepository
@@ -22,19 +23,22 @@ CREATE TABLE IF NOT EXISTS order_record (
     quantity REAL NOT NULL,
     price REAL NOT NULL,
     status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
     execution_success INTEGER,
     execution_message TEXT,
     execution_fee REAL,
     execution_slippage REAL,
     execution_status TEXT,
-    execution_broker_order_id TEXT
+    execution_broker_order_id TEXT,
+    execution_filled_quantity REAL
 )
 """
 
 _SELECT_COLUMNS = (
-    "client_order_id, symbol, side, quantity, price, status, "
+    "client_order_id, symbol, side, quantity, price, status, created_at, updated_at, "
     "execution_success, execution_message, execution_fee, execution_slippage, "
-    "execution_status, execution_broker_order_id"
+    "execution_status, execution_broker_order_id, execution_filled_quantity"
 )
 
 
@@ -47,12 +51,15 @@ def _row_to_record(row: tuple) -> OrderRecord:
         quantity,
         price,
         status,
+        created_at,
+        updated_at,
         execution_success,
         execution_message,
         execution_fee,
         execution_slippage,
         execution_status,
         execution_broker_order_id,
+        execution_filled_quantity,
     ) = row
 
     order = Order(
@@ -73,12 +80,15 @@ def _row_to_record(row: tuple) -> OrderRecord:
             slippage=execution_slippage,
             status=ExecutionStatus(execution_status),
             broker_order_id=execution_broker_order_id,
+            filled_quantity=execution_filled_quantity,
         )
 
     return OrderRecord(
         client_order_id=client_order_id,
         order=order,
         status=OrderStatus(status),
+        created_at=datetime.fromisoformat(created_at),
+        updated_at=datetime.fromisoformat(updated_at),
         execution_result=execution_result,
     )
 
@@ -114,9 +124,11 @@ class SqliteOrderRepository(OrderRepository):
                 connection.execute(
                     "INSERT OR REPLACE INTO order_record ("
                     "client_order_id, symbol, side, quantity, price, status, "
+                    "created_at, updated_at, "
                     "execution_success, execution_message, execution_fee, "
-                    "execution_slippage, execution_status, execution_broker_order_id"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "execution_slippage, execution_status, execution_broker_order_id, "
+                    "execution_filled_quantity"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         order_record.client_order_id,
                         order_record.order.symbol,
@@ -124,12 +136,15 @@ class SqliteOrderRepository(OrderRepository):
                         order_record.order.quantity,
                         order_record.order.price,
                         order_record.status.value,
+                        order_record.created_at.isoformat(),
+                        order_record.updated_at.isoformat(),
                         int(execution_result.success) if execution_result else None,
                         execution_result.message if execution_result else None,
                         execution_result.fee if execution_result else None,
                         execution_result.slippage if execution_result else None,
                         execution_result.status.value if execution_result else None,
                         execution_result.broker_order_id if execution_result else None,
+                        execution_result.filled_quantity if execution_result else None,
                     ),
                 )
         finally:

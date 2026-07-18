@@ -4,6 +4,7 @@ import pytest
 
 from tradingbot.backtest.engine import BacktestEngine
 from tradingbot.core.engine import TradingEngine
+from tradingbot.core.models import ExecutionCostEstimate
 from tradingbot.core.orchestrator import TradingOrchestrator
 from tradingbot.data.models import MarketCandle
 from tradingbot.execution.broker import PaperBroker
@@ -123,6 +124,9 @@ def _build_orchestrator(
         risk_manager=RiskManager(max_position_size=max_position_size),
         portfolio=portfolio,
         broker=PaperBroker(fee_percent=fee_percent, slippage_percent=slippage_percent),
+        cost_estimate=ExecutionCostEstimate(
+            fee_percent=fee_percent, slippage_percent=slippage_percent
+        ),
     )
     return portfolio, orchestrator
 
@@ -197,6 +201,7 @@ def test_backtest_remains_compatible_with_cost_aware_broker():
         risk_manager=RiskManager(max_position_size=1000.0),
         portfolio=portfolio,
         broker=PaperBroker(fee_percent=0.001, slippage_percent=0.001),
+        cost_estimate=ExecutionCostEstimate(fee_percent=0.001, slippage_percent=0.001),
     )
     candles = SimulatedDataProvider(seed=4).get_candles(
         symbol="BTCUSDT", timeframe="1h", limit=10

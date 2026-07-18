@@ -1,6 +1,10 @@
+from datetime import UTC, datetime
+
 from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order, OrderStatus
 from tradingbot.execution.order_repository import OrderRecord, OrderRepository
 from tradingbot.execution.persistence import SqliteOrderRepository
+
+_NOW = datetime(2026, 7, 18, 12, tzinfo=UTC)
 
 
 def _repository(tmp_path) -> SqliteOrderRepository:
@@ -34,7 +38,13 @@ def test_save_and_get_roundtrip_without_execution_result(tmp_path):
 
     repository = _repository(tmp_path)
     order = _order()
-    record = OrderRecord(client_order_id="order-1", order=order, status=OrderStatus.SUBMITTED)
+    record = OrderRecord(
+        client_order_id="order-1",
+        order=order,
+        status=OrderStatus.SUBMITTED,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
 
     repository.save(record)
     loaded = repository.get("order-1")
@@ -43,6 +53,8 @@ def test_save_and_get_roundtrip_without_execution_result(tmp_path):
     assert loaded.status == OrderStatus.SUBMITTED
     assert loaded.execution_result is None
     assert loaded.order.symbol == "BTCUSDT"
+    assert loaded.created_at == _NOW
+    assert loaded.updated_at == _NOW
 
 
 def test_save_and_get_roundtrip_with_execution_result(tmp_path):
@@ -57,9 +69,14 @@ def test_save_and_get_roundtrip_with_execution_result(tmp_path):
         slippage=0.5,
         status=ExecutionStatus.SUCCESS,
         broker_order_id="order-1",
+        filled_quantity=0.05,
     )
     record = OrderRecord(
-        client_order_id="order-1", order=order, status=OrderStatus.FILLED,
+        client_order_id="order-1",
+        order=order,
+        status=OrderStatus.FILLED,
+        created_at=_NOW,
+        updated_at=_NOW,
         execution_result=execution_result,
     )
 
@@ -72,6 +89,7 @@ def test_save_and_get_roundtrip_with_execution_result(tmp_path):
     assert loaded.execution_result.fee == 1.5
     assert loaded.execution_result.status == ExecutionStatus.SUCCESS
     assert loaded.execution_result.broker_order_id == "order-1"
+    assert loaded.execution_result.filled_quantity == 0.05
 
 
 def test_save_overwrites_previous_record_for_same_client_order_id(tmp_path):
@@ -79,10 +97,22 @@ def test_save_overwrites_previous_record_for_same_client_order_id(tmp_path):
     repository = _repository(tmp_path)
     order = _order()
     repository.save(
-        OrderRecord(client_order_id="order-1", order=order, status=OrderStatus.CREATED)
+        OrderRecord(
+            client_order_id="order-1",
+            order=order,
+            status=OrderStatus.CREATED,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
     )
     repository.save(
-        OrderRecord(client_order_id="order-1", order=order, status=OrderStatus.SUBMITTED)
+        OrderRecord(
+            client_order_id="order-1",
+            order=order,
+            status=OrderStatus.SUBMITTED,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
     )
 
     loaded = repository.get("order-1")
@@ -95,10 +125,22 @@ def test_all_returns_every_saved_record_in_insertion_order(tmp_path):
 
     repository = _repository(tmp_path)
     repository.save(
-        OrderRecord(client_order_id="order-1", order=_order("order-1"), status=OrderStatus.CREATED)
+        OrderRecord(
+            client_order_id="order-1",
+            order=_order("order-1"),
+            status=OrderStatus.CREATED,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
     )
     repository.save(
-        OrderRecord(client_order_id="order-2", order=_order("order-2"), status=OrderStatus.CREATED)
+        OrderRecord(
+            client_order_id="order-2",
+            order=_order("order-2"),
+            status=OrderStatus.CREATED,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
     )
 
     all_records = repository.all()
@@ -121,7 +163,11 @@ def test_records_unknown_status_execution_result(tmp_path):
     )
     repository.save(
         OrderRecord(
-            client_order_id="order-1", order=order, status=OrderStatus.UNKNOWN,
+            client_order_id="order-1",
+            order=order,
+            status=OrderStatus.UNKNOWN,
+            created_at=_NOW,
+            updated_at=_NOW,
             execution_result=execution_result,
         )
     )

@@ -42,6 +42,14 @@ class OrderStatus(Enum):
     Order-Stornierungs-Feature vorgesehen - wird in dieser Phase von
     keinem Code gesetzt (keine neue Broker-Methode, siehe
     `execution/broker.py`).
+
+    `PARTIALLY_FILLED` ist - genau wie `CANCELLED` - reine Modell-
+    Vorbereitung: kein Code leitet diesen Status aktuell automatisch aus
+    `ExecutionResult.filled_quantity` ab. Ein `ExecutionResult(status=
+    SUCCESS, filled_quantity=<Teilmenge>)` resultiert im `OrderManager`
+    weiterhin in `FILLED`, nicht in `PARTIALLY_FILLED` - die automatische
+    Ableitung sowie die Portfolio-Buchungslogik für Teilausführungen sind
+    bewusst einer eigenen, späteren Phase vorbehalten.
     """
 
     CREATED = "created"
@@ -50,6 +58,7 @@ class OrderStatus(Enum):
     FAILED = "failed"
     UNKNOWN = "unknown"
     CANCELLED = "cancelled"
+    PARTIALLY_FILLED = "partially_filled"
 
 
 @dataclass
@@ -93,6 +102,12 @@ class ExecutionResult:
     UNKNOWN`) - `success` bleibt als bestehendes Feld unverändert, keine
     Ersetzung. `broker_order_id` ist die vom Broker (nicht vom Aufrufer)
     vergebene Kennung, `None` wenn keine vergeben wurde.
+
+    `filled_quantity` ist `None`, wenn nicht anwendbar bzw. vollständig
+    gefüllt; ein numerischer Wert kleiner als `order.quantity` bedeutet
+    eine Teilausführung (Partial Fill). Reine Modell-Vorbereitung: weder
+    `OrderManager` noch `PortfolioManager`/`apply_trade()` werten dieses
+    Feld aktuell aus - siehe `OrderStatus.PARTIALLY_FILLED`.
     """
 
     success: bool
@@ -102,3 +117,4 @@ class ExecutionResult:
     slippage: float
     status: ExecutionStatus = ExecutionStatus.SUCCESS
     broker_order_id: str | None = None
+    filled_quantity: float | None = None

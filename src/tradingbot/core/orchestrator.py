@@ -9,9 +9,9 @@ from typing import cast
 from loguru import logger
 
 from tradingbot.core.engine import TradingEngine
-from tradingbot.core.models import TradingCycleResult
+from tradingbot.core.models import ExecutionCostEstimate, TradingCycleResult
 from tradingbot.data.models import MarketCandle
-from tradingbot.execution.broker import PaperBroker
+from tradingbot.execution.broker import Broker
 from tradingbot.execution.models import Order, OrderSide
 from tradingbot.execution.order_manager import OrderManager
 from tradingbot.execution.order_repository import InMemoryOrderRepository, OrderRepository
@@ -23,13 +23,14 @@ from tradingbot.strategy.base import Strategy
 class TradingOrchestrator:
     """Führt einen vollständigen Paper-Trading-Zyklus aus.
 
-    Verbindet Strategie, Risiko-Prüfung, Order-Ausführung (`PaperBroker`) und
-    Portfolio-Buchung. Führt nur dann etwas aus, wenn die übergebene
-    `TradingEngine` aktiv ist (`start()` wurde aufgerufen) - andernfalls wird
-    kein Marktzugriff simuliert und kein Trade gebucht.
+    Verbindet Strategie, Risiko-Prüfung, Order-Ausführung und Portfolio-
+    Buchung. Führt nur dann etwas aus, wenn die übergebene `TradingEngine`
+    aktiv ist (`start()` wurde aufgerufen) - andernfalls wird kein
+    Marktzugriff simuliert und kein Trade gebucht.
 
-    Enthält keine echte Börsen-Anbindung und kein Live-Trading; alle
-    Ausführungen laufen ausschliesslich über den simulierten `PaperBroker`.
+    Kennt ausschliesslich die `Broker`-ABC, keine konkrete Implementierung
+    (`PaperBroker`, `MockLiveBroker`, künftig `LiveBroker` sind austauschbar
+    - siehe `cost_estimate` unten, das genau diese Entkopplung ermöglicht).
     """
 
     def __init__(
@@ -38,8 +39,9 @@ class TradingOrchestrator:
         strategy: Strategy,
         risk_manager: RiskManager,
         portfolio: PortfolioManager,
-        broker: PaperBroker,
+        broker: Broker,
         order_repository: OrderRepository | None = None,
+        cost_estimate: ExecutionCostEstimate | None = None,
     ) -> None:
         self._engine = engine
         self._strategy = strategy
@@ -56,13 +58,20 @@ class TradingOrchestrator:
         # einen anderen Broker gebunden sein.
         repository = order_repository if order_repository is not None else InMemoryOrderRepository()
         self._order_manager = OrderManager(broker=broker, repository=repository)
+        # Bleibt `cost_estimate` weg, entspricht das exakt dem bisherigen
+        # kostenfreien Verhalten (0.0/0.0) - unabhängig vom konkreten
+        # Broker, damit die Kapitalprüfung unten keine Broker-spezifischen
+        # Properties mehr lesen muss (siehe ExecutionCostEstimate-Docstring).
+        self._cost_estimate = (
+            cost_estimate if cost_estimate is not None else ExecutionCostEstimate()
+        )
 
     def run_cycle(self, candles: list[MarketCandle]) -> TradingCycleResult:
         """Führt einen Trading-Zyklus für die übergebenen Kerzen aus.
 
         Ablauf: Strategie analysiert die Kerzen -> Risiko-System prüft das
         Signal -> bei Genehmigung wird eine Order erzeugt, über den
-        `PaperBroker` ausgeführt und bei Erfolg im Portfolio gebucht.
+        `OrderManager`/Broker ausgeführt und bei Erfolg im Portfolio gebucht.
 
         Args:
             candles: Kerzen eines einzelnen Symbols, chronologisch sortiert.
@@ -74,8 +83,8 @@ class TradingOrchestrator:
             Signal nicht genehmigt wurde oder - bei BUY - nicht genügend
             Kapital im Portfolio verfügbar ist (siehe
             `PortfolioManager.available_cash()`). Ein Trade kann so nie
-            negatives Kapital erzeugen; der `PaperBroker` wird in diesem
-            Fall gar nicht erst aufgerufen.
+            negatives Kapital erzeugen; der Broker wird in diesem Fall gar
+            nicht erst aufgerufen.
 
         Raises:
             RuntimeError: wenn die `TradingEngine` nicht aktiv ist.
@@ -111,12 +120,13 @@ class TradingOrchestrator:
         quantity = decision.position_size / current_price
 
         if side == "BUY":
-            # Exakte Vorhersage des Kapitalbedarfs inkl. Slippage und
-            # Gebühr - derselbe Fill-Preis, den der Broker intern berechnet
-            # (siehe PaperBroker.execute), damit die Kapitalprüfung auch bei
-            # aktivierten Kosten nicht unterschätzt wird.
-            expected_fill_price = current_price * (1 + self._broker.slippage_percent)
-            required_cash = quantity * expected_fill_price * (1 + self._broker.fee_percent)
+            # Vorhersage des Kapitalbedarfs inkl. angenommener Slippage und
+            # Gebühr - broker-unabhängig (siehe ExecutionCostEstimate), da
+            # die Broker-ABC selbst keine Kosten-Properties kennt. Bei
+            # PaperBroker mit passend konfiguriertem cost_estimate entspricht
+            # das exakt dem intern berechneten Fill-Preis.
+            expected_fill_price = current_price * (1 + self._cost_estimate.slippage_percent)
+            required_cash = quantity * expected_fill_price * (1 + self._cost_estimate.fee_percent)
             available_cash = self._portfolio.available_cash()
             if required_cash > available_cash:
                 logger.info(

@@ -1,9 +1,13 @@
+from datetime import UTC, datetime
+
 from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order, OrderStatus
 from tradingbot.execution.order_repository import (
     InMemoryOrderRepository,
     OrderRecord,
     OrderRepository,
 )
+
+_NOW = datetime(2026, 7, 18, 12, tzinfo=UTC)
 
 
 def _order(client_order_id: str = "order-1") -> Order:
@@ -18,7 +22,11 @@ def _record(
 ) -> OrderRecord:
 
     return OrderRecord(
-        client_order_id=client_order_id, order=_order(client_order_id), status=status
+        client_order_id=client_order_id,
+        order=_order(client_order_id),
+        status=status,
+        created_at=_NOW,
+        updated_at=_NOW,
     )
 
 
@@ -74,6 +82,7 @@ def test_save_carries_execution_result():
     )
     record = OrderRecord(
         client_order_id="order-1", order=order, status=OrderStatus.FILLED,
+        created_at=_NOW, updated_at=_NOW,
         execution_result=execution_result,
     )
 

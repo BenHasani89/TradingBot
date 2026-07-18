@@ -1,7 +1,11 @@
+from datetime import UTC, datetime
+
 from tradingbot.execution.broker import Broker
 from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order, OrderStatus
 from tradingbot.execution.order_repository import InMemoryOrderRepository, OrderRecord
 from tradingbot.paper_trading.reconciliation import ReconciliationResult, ReconciliationService
+
+_NOW = datetime(2026, 7, 18, 12, tzinfo=UTC)
 
 
 class _FakeStatusBroker(Broker):
@@ -28,7 +32,11 @@ def _order(client_order_id: str = "order-1") -> Order:
 def _local_record(client_order_id: str, status: OrderStatus) -> OrderRecord:
 
     return OrderRecord(
-        client_order_id=client_order_id, order=_order(client_order_id), status=status
+        client_order_id=client_order_id,
+        order=_order(client_order_id),
+        status=status,
+        created_at=_NOW,
+        updated_at=_NOW,
     )
 
 

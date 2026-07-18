@@ -11,6 +11,22 @@ from tradingbot.strategy.models import TradingSignal
 
 
 @dataclass
+class ExecutionCostEstimate:
+    """Für die Kapitalprüfung vor einem BUY angenommene Kosten (Slippage,
+    Gebühr) - unabhängig vom konkreten Broker.
+
+    Ersetzt die frühere direkte Kopplung von `TradingOrchestrator` an
+    `PaperBroker`-spezifische Properties (`slippage_percent`/`fee_percent`),
+    die einer echten `Broker`-ABC-Implementierung (z. B. `MockLiveBroker`,
+    künftig `LiveBroker`) fehlen würden. Der Standardwert (`0.0`/`0.0`)
+    entspricht exakt dem bisherigen kostenfreien Verhalten.
+    """
+
+    fee_percent: float = 0.0
+    slippage_percent: float = 0.0
+
+
+@dataclass
 class TradingCycleResult:
     """Ergebnis eines vollständigen Paper-Trading-Zyklus.
 

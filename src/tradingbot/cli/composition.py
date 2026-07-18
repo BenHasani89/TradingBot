@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from tradingbot.cli.config import RuntimeConfig
 from tradingbot.core.engine import TradingEngine
+from tradingbot.core.models import ExecutionCostEstimate
 from tradingbot.core.orchestrator import TradingOrchestrator
 from tradingbot.data.market import MarketDataStore
 from tradingbot.data.simulated_provider import SimulatedDataProvider
@@ -56,6 +57,12 @@ def build_engine(config: RuntimeConfig) -> tuple[PaperTradingEngine, SimpleLoopS
         risk_manager=RiskManager(max_position_size=config.max_position_size),
         portfolio=portfolio,
         broker=PaperBroker(
+            fee_percent=config.fee_percent, slippage_percent=config.slippage_percent
+        ),
+        # Muss zum PaperBroker oben passen - TradingOrchestrator liest Fee/
+        # Slippage nicht mehr vom Broker selbst (siehe core/orchestrator.py,
+        # core/models.py::ExecutionCostEstimate).
+        cost_estimate=ExecutionCostEstimate(
             fee_percent=config.fee_percent, slippage_percent=config.slippage_percent
         ),
         # Persistente Order-Historie für die Paper-Trading-Laufzeit (überlebt

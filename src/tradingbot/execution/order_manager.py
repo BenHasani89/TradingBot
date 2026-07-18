@@ -10,6 +10,9 @@ Risk-Konzepte - ein reiner Execution-Layer-Baustein, unterhalb von
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import UTC, datetime
+
 from tradingbot.execution.broker import Broker
 from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order, OrderStatus
 from tradingbot.execution.order_repository import OrderRecord, OrderRepository
@@ -26,9 +29,15 @@ class OrderManager:
     Broker-Ausführungen über `client_order_id`.
     """
 
-    def __init__(self, broker: Broker, repository: OrderRepository) -> None:
+    def __init__(
+        self,
+        broker: Broker,
+        repository: OrderRepository,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
         self._broker = broker
         self._repository = repository
+        self._now = now
 
     def submit(self, order: Order) -> ExecutionResult:
         """Führt `order` über den Broker aus.
@@ -56,11 +65,14 @@ class OrderManager:
         if existing is not None:
             return self._result_for_existing(existing, order)
 
+        created_at = self._now()
         self._repository.save(
             OrderRecord(
                 client_order_id=order.client_order_id,
                 order=order,
                 status=OrderStatus.CREATED,
+                created_at=created_at,
+                updated_at=created_at,
             )
         )
         self._repository.save(
@@ -68,6 +80,8 @@ class OrderManager:
                 client_order_id=order.client_order_id,
                 order=order,
                 status=OrderStatus.SUBMITTED,
+                created_at=created_at,
+                updated_at=self._now(),
             )
         )
 
@@ -78,6 +92,8 @@ class OrderManager:
                 client_order_id=order.client_order_id,
                 order=order,
                 status=_EXECUTION_TO_ORDER_STATUS[execution_result.status],
+                created_at=created_at,
+                updated_at=self._now(),
                 execution_result=execution_result,
             )
         )

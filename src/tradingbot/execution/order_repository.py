@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 
 from tradingbot.execution.models import ExecutionResult, Order, OrderStatus
 
@@ -18,11 +19,19 @@ class OrderRecord:
     Endzustand erreicht hat (`CREATED`/`SUBMITTED`). Der zentrale
     Datensatz für Duplicate Detection (`client_order_id`) und künftige
     Reconciliation.
+
+    `created_at`/`updated_at` sind Pflichtfelder ohne Default - der
+    Aufrufer (`OrderManager`) muss sie immer explizit setzen, damit kein
+    unvollständiger `OrderRecord` entsteht. Wichtig für Reconciliation:
+    ohne Zeitstempel liesse sich nicht unterscheiden zwischen "gerade erst
+    abgeschickt" und "hängt seit Langem bei `SUBMITTED` fest".
     """
 
     client_order_id: str
     order: Order
     status: OrderStatus
+    created_at: datetime
+    updated_at: datetime
     execution_result: ExecutionResult | None = None
 
 
