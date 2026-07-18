@@ -310,5 +310,60 @@ def test_portfolio_engine_no_assets_returns_empty_result():
     result = engine.run()
 
     assert result.equity_curve == []
+    assert result.equity_curve_by_symbol == {}
     assert result.trades == 0
     assert result.profit_loss == 0.0
+
+
+# --- equity_curve_by_symbol ---------------------------------------------------------------
+
+
+def test_portfolio_engine_records_equity_curve_per_symbol():
+
+    candles_by_symbol = {
+        "BTCUSDT": _flat_candles(100.0, 6, "BTCUSDT"),
+        "ETHUSDT": _flat_candles(100.0, 6, "ETHUSDT"),
+    }
+    engine = PortfolioBacktestEngine(
+        candles_by_symbol=candles_by_symbol,
+        strategy_class=_AlwaysBuyStrategy,
+        strategy_params={},
+        initial_capital=1000.0,
+        allocator=CapitalAllocator(),
+    )
+
+    result = engine.run()
+
+    assert set(result.equity_curve_by_symbol.keys()) == {"BTCUSDT", "ETHUSDT"}
+    assert len(result.equity_curve_by_symbol["BTCUSDT"]) == 5
+    assert len(result.equity_curve_by_symbol["ETHUSDT"]) == 5
+
+
+def test_portfolio_engine_asset_curves_sum_to_portfolio_curve():
+
+    candles_by_symbol = {
+        "BTCUSDT": SimulatedDataProvider(seed=1).get_candles(
+            symbol="BTCUSDT", timeframe="1h", limit=15
+        ),
+        "ETHUSDT": SimulatedDataProvider(seed=2).get_candles(
+            symbol="ETHUSDT", timeframe="1h", limit=15
+        ),
+    }
+    engine = PortfolioBacktestEngine(
+        candles_by_symbol=candles_by_symbol,
+        strategy_class=MovingAverageCrossoverStrategy,
+        strategy_params={"short_window": 2, "long_window": 5},
+        initial_capital=10000.0,
+        allocator=CapitalAllocator(),
+    )
+
+    result = engine.run()
+
+    # Die notionale Aufteilung des gemeinsamen Kapitals auf die Assets muss
+    # sich zu jedem Zeitpunkt exakt zur echten Portfolio-Equity-Kurve
+    # aufsummieren - Kernkorrektheitspruefung des Sub-Cash-Ansatzes.
+    for t in range(len(result.equity_curve)):
+        asset_sum = sum(
+            result.equity_curve_by_symbol[symbol][t].total_value for symbol in candles_by_symbol
+        )
+        assert asset_sum == pytest.approx(result.equity_curve[t].total_value, rel=1e-9)

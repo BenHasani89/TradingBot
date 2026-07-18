@@ -23,6 +23,7 @@ from tradingbot.core.models import TradingCycleResult
 from tradingbot.core.orchestrator import TradingOrchestrator
 from tradingbot.data.models import MarketCandle
 from tradingbot.execution.broker import PaperBroker
+from tradingbot.execution.models import ExecutionResult
 from tradingbot.portfolio.manager import PortfolioManager
 from tradingbot.risk.manager import RiskManager
 from tradingbot.strategy.base import Strategy
@@ -30,15 +31,42 @@ from tradingbot.strategy.base import Strategy
 
 @dataclass
 class PortfolioBacktestResult:
-    """Ergebnis einer Portfolio-Backtest-Simulation über mehrere Assets."""
+    """Ergebnis einer Portfolio-Backtest-Simulation über mehrere Assets.
+
+    `equity_curve_by_symbol` ist ein notionales Sub-Portfolio je Asset: es
+    startet bei dessen `allocation`-Anteil und entwickelt sich durch die
+    Cash-Auswirkung von dessen eigenen Trades plus den aktuellen Wert einer
+    offenen Position weiter (siehe `_cash_impact`). Dadurch enthält der
+    Endwert eines Assets realisierte **und** unrealisierte Gewinne/Verluste
+    automatisch, ohne sie separat aufzuaddieren (kein Doppelzählungsrisiko).
+    Die Summe über alle Assets entspricht zu jedem Zeitpunkt exakt
+    `equity_curve` (gemeinsames Kapital wird nur notional aufgeteilt
+    dargestellt, nicht tatsächlich getrennt verwaltet).
+    """
 
     trades: int
     profit_loss: float
     performance_percent: float
     max_drawdown_percent: float
     equity_curve: list[EquityPoint]
+    equity_curve_by_symbol: dict[str, list[EquityPoint]]
     cycle_results_by_symbol: dict[str, list[TradingCycleResult]]
     allocation: dict[str, float]
+
+
+def _cash_impact(execution: ExecutionResult) -> float:
+    """Cash-Auswirkung einer erfolgreichen Order (negativ bei BUY, positiv
+    bei SELL) - spiegelt exakt die Formel aus
+    `TradingOrchestrator.run_cycle()` wider, damit die notionale
+    Sub-Portfolio-Kapitalführung je Asset mit der echten, gemeinsamen
+    Kapitalführung in `PortfolioManager` übereinstimmt.
+    """
+
+    order = execution.order
+    trade_value = order.price * order.quantity
+    if order.side == "BUY":
+        return -(trade_value + execution.fee)
+    return trade_value - execution.fee
 
 
 class PortfolioBacktestEngine:
@@ -104,6 +132,11 @@ class PortfolioBacktestEngine:
             symbol: [] for symbol in symbols
         }
         equity_curve: list[EquityPoint] = []
+        equity_curve_by_symbol: dict[str, list[EquityPoint]] = {symbol: [] for symbol in symbols}
+        # Notionale, je-Asset zugeordnete Kapitalführung - rein für die
+        # Berichterstattung, verändert nie das echte, gemeinsame Kapital in
+        # `portfolio` (siehe _cash_impact).
+        sub_cash: dict[str, float] = dict(allocation)
 
         for i in range(1, step_count):
             current_prices: dict[str, float] = {}
@@ -114,9 +147,21 @@ class PortfolioBacktestEngine:
                 cycle_results_by_symbol[symbol].append(result)
                 current_prices[symbol] = window[-1].close
 
+                if result.execution is not None and result.execution.success:
+                    sub_cash[symbol] += _cash_impact(result.execution)
+
             timestamp = self._candles_by_symbol[symbols[0]][i].timestamp
             total_value = portfolio.status().total_value(current_prices)
             equity_curve.append(EquityPoint(timestamp=timestamp, total_value=total_value))
+
+            positions_by_symbol = {p.symbol: p for p in portfolio.status().positions}
+            for symbol in symbols:
+                position = positions_by_symbol.get(symbol)
+                position_value = position.value(current_prices[symbol]) if position else 0.0
+                asset_value = sub_cash[symbol] + position_value
+                equity_curve_by_symbol[symbol].append(
+                    EquityPoint(timestamp=timestamp, total_value=asset_value)
+                )
 
         trades = sum(
             1
@@ -132,6 +177,7 @@ class PortfolioBacktestEngine:
             performance_percent=performance_percent(self._initial_capital, equity_curve),
             max_drawdown_percent=max_drawdown_percent(equity_curve),
             equity_curve=equity_curve,
+            equity_curve_by_symbol=equity_curve_by_symbol,
             cycle_results_by_symbol=cycle_results_by_symbol,
             allocation=allocation,
         )
