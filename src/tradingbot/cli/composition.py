@@ -13,6 +13,7 @@ from tradingbot.core.orchestrator import TradingOrchestrator
 from tradingbot.data.market import MarketDataStore
 from tradingbot.data.simulated_provider import SimulatedDataProvider
 from tradingbot.execution.broker import PaperBroker
+from tradingbot.execution.persistence import SqliteOrderRepository
 from tradingbot.paper_trading.audit import SqliteAuditLog
 from tradingbot.paper_trading.engine import PaperTradingEngine
 from tradingbot.paper_trading.health import HealthSnapshot, build_health_snapshot
@@ -57,6 +58,12 @@ def build_engine(config: RuntimeConfig) -> tuple[PaperTradingEngine, SimpleLoopS
         broker=PaperBroker(
             fee_percent=config.fee_percent, slippage_percent=config.slippage_percent
         ),
+        # Persistente Order-Historie für die Paper-Trading-Laufzeit (überlebt
+        # einen Neustart) - im Unterschied zum Backtest-Pfad, der denselben
+        # `TradingOrchestrator` ohne `order_repository` verwendet und dadurch
+        # automatisch beim In-Memory-Standard bleibt (siehe
+        # `core/orchestrator.py`).
+        order_repository=SqliteOrderRepository(config.db_path),
     )
 
     session = create_session(

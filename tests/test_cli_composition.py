@@ -2,6 +2,8 @@ import pytest
 
 from tradingbot.cli import composition
 from tradingbot.cli.config import build_config
+from tradingbot.execution.models import OrderStatus
+from tradingbot.execution.persistence import SqliteOrderRepository
 from tradingbot.paper_trading.engine import PaperTradingEngine
 from tradingbot.paper_trading.scheduler import Scheduler
 
@@ -104,3 +106,28 @@ def test_load_health_snapshot_reflects_persisted_state_from_separate_process(tmp
     assert snapshot.engine_running is False
     assert snapshot.last_candle_timestamp is None
     assert snapshot.risk_state is not None
+
+
+# --- Option B: PaperTrading-Pfad verwendet persistentes OrderRepository -----------------------
+
+
+def test_paper_trading_path_persists_orders_in_sqlite_order_repository(tmp_path):
+    """Der vollständige PaperTradingEngine-Pfad (über build_engine ->
+    TradingOrchestrator) muss ohne jede eigene Codeänderung an
+    PaperTradingEngine ein SqliteOrderRepository befüllen, sobald
+    composition.py eines injiziert."""
+
+    config = _config(tmp_path, session_id="session-1", candle_limit=5)
+    engine, _ = composition.build_engine(config)
+    engine.start()
+
+    engine.run_cycle_once()
+    engine.stop()
+
+    order_repository = SqliteOrderRepository(config.db_path)
+    records = order_repository.all()
+
+    assert len(records) >= 1
+    assert records[0].status == OrderStatus.FILLED
+    assert records[0].execution_result is not None
+    assert records[0].execution_result.success is True

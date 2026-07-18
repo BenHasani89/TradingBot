@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime
 from tradingbot.core.engine import TradingEngine
 from tradingbot.data.market import MarketDataStore
 from tradingbot.data.models import MarketCandle
+from tradingbot.execution.models import ExecutionStatus
 from tradingbot.paper_trading.health import build_health_snapshot
 from tradingbot.paper_trading.order_history import OrderExecution, SqliteOrderHistory
 from tradingbot.paper_trading.session import SessionMetadata
@@ -119,6 +120,9 @@ def test_snapshot_includes_latest_order_from_history(tmp_path):
             price=60000.0,
             fee=0.5,
             success=True,
+            client_order_id="client-1",
+            broker_order_id="client-1",
+            status=ExecutionStatus.SUCCESS,
         ),
     )
 

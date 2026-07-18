@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 
 from tradingbot.execution.models import (
     ExecutionResult,
+    ExecutionStatus,
     Order,
 )
 
@@ -18,6 +19,14 @@ class Broker(ABC):
     Logik (keine Gebühren-/Slippage-Annahmen, kein Balance-/Positions-
     Abgleich) - das bleibt Sache der jeweiligen Implementierung
     (`PaperBroker`, künftig z. B. `LiveBroker`).
+
+    Eine Implementierung muss `order.client_order_id` unverändert in das
+    zurückgegebene `ExecutionResult.order` übernehmen (nicht neu vergeben) -
+    sie identifiziert die Order über ihren gesamten Lebenszyklus hinweg.
+    `ExecutionResult.broker_order_id` ist die vom Broker vergebene
+    Gegenstelle dazu, `ExecutionResult.status` ergänzt `success` um den
+    `UNKNOWN`-Zustand für Fälle mit unklarem Ausgang (z. B. Zeitüberschreitung
+    bei einem `LiveBroker`) - siehe `execution.models.ExecutionStatus`.
     """
 
     @abstractmethod
@@ -79,6 +88,7 @@ class PaperBroker(Broker):
             side=order.side,
             quantity=order.quantity,
             price=fill_price,
+            client_order_id=order.client_order_id,
         )
         self.orders.append(filled_order)
 
@@ -88,6 +98,8 @@ class PaperBroker(Broker):
             message="Paper Order ausgeführt",
             fee=fee_cost,
             slippage=slippage_cost,
+            status=ExecutionStatus.SUCCESS,
+            broker_order_id=order.client_order_id,
         )
 
     def history(self) -> list[Order]:

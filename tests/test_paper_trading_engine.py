@@ -8,7 +8,7 @@ from tradingbot.data.market import MarketDataStore
 from tradingbot.data.models import MarketCandle
 from tradingbot.data.provider import DataProvider
 from tradingbot.execution.broker import Broker, PaperBroker
-from tradingbot.execution.models import ExecutionResult, Order
+from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order
 from tradingbot.paper_trading.audit import AuditEventType, SqliteAuditLog
 from tradingbot.paper_trading.engine import PaperTradingEngine
 from tradingbot.paper_trading.order_history import SqliteOrderHistory
@@ -494,6 +494,9 @@ def test_successful_execution_is_recorded_in_order_history(tmp_path):
     assert latest.symbol == SYMBOL
     assert latest.side == "BUY"
     assert latest.success is True
+    assert latest.client_order_id
+    assert latest.broker_order_id == latest.client_order_id
+    assert latest.status == ExecutionStatus.SUCCESS
 
 
 # --- HealthSnapshot -------------------------------------------------------------------------

@@ -13,6 +13,8 @@ from tradingbot.core.models import TradingCycleResult
 from tradingbot.data.models import MarketCandle
 from tradingbot.execution.broker import PaperBroker
 from tradingbot.execution.models import Order, OrderSide
+from tradingbot.execution.order_manager import OrderManager
+from tradingbot.execution.order_repository import InMemoryOrderRepository, OrderRepository
 from tradingbot.portfolio.manager import PortfolioManager
 from tradingbot.risk.manager import RiskManager
 from tradingbot.strategy.base import Strategy
@@ -37,12 +39,23 @@ class TradingOrchestrator:
         risk_manager: RiskManager,
         portfolio: PortfolioManager,
         broker: PaperBroker,
+        order_repository: OrderRepository | None = None,
     ) -> None:
         self._engine = engine
         self._strategy = strategy
         self._risk_manager = risk_manager
         self._portfolio = portfolio
         self._broker = broker
+        # Additiver Injection-Punkt: bleibt `order_repository` weg (alle
+        # Backtest-/Research-Aufrufer, alle bisherigen Tests), verhält sich
+        # der Orchestrator exakt wie zuvor - `InMemoryOrderRepository`, kein
+        # SQLite-Schreibvorgang pro simuliertem Trade. Der `OrderManager`
+        # bleibt in jedem Fall im Besitz des Orchestrators und an denselben
+        # `broker` gebunden wie der Cash-Check weiter unten - ein separat
+        # injizierter, fertiger `OrderManager` könnte sonst versehentlich an
+        # einen anderen Broker gebunden sein.
+        repository = order_repository if order_repository is not None else InMemoryOrderRepository()
+        self._order_manager = OrderManager(broker=broker, repository=repository)
 
     def run_cycle(self, candles: list[MarketCandle]) -> TradingCycleResult:
         """Führt einen Trading-Zyklus für die übergebenen Kerzen aus.
@@ -127,7 +140,7 @@ class TradingOrchestrator:
             price=current_price,
         )
 
-        execution = self._broker.execute(order)
+        execution = self._order_manager.submit(order)
         closed_trade = None
 
         if execution.success:

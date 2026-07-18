@@ -12,6 +12,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 
+from tradingbot.execution.models import ExecutionStatus
+
 
 @dataclass
 class OrderExecution:
@@ -20,6 +22,14 @@ class OrderExecution:
     `session_id` ist bewusst kein Feld dieser Klasse (analog zu
     `PortfolioStatus`/`RiskState`) - die Zuordnung übernimmt
     `SqliteOrderHistory` über den expliziten `session_id`-Parameter.
+
+    `client_order_id`, `broker_order_id` und `status` spiegeln die
+    gleichnamigen Felder aus `execution.models.Order`/`ExecutionResult`
+    wider (siehe dort) - diese Tabelle ist die persistente Aufzeichnung
+    dessen, was dem Broker geschickt wurde und mit welchem Ausgang.
+    `client_order_id` ist eindeutig (Duplicate Detection): ein zweiter
+    `append()`-Versuch mit derselben ID schlägt fehl, statt eine Order
+    versehentlich doppelt zu verbuchen.
     """
 
     timestamp: datetime
@@ -29,6 +39,9 @@ class OrderExecution:
     price: float
     fee: float
     success: bool
+    client_order_id: str
+    broker_order_id: str | None
+    status: ExecutionStatus
 
 
 _CREATE_ORDER_EXECUTION_TABLE = """
@@ -41,14 +54,33 @@ CREATE TABLE IF NOT EXISTS order_execution (
     quantity REAL NOT NULL,
     price REAL NOT NULL,
     fee REAL NOT NULL,
-    success INTEGER NOT NULL
+    success INTEGER NOT NULL,
+    client_order_id TEXT NOT NULL UNIQUE,
+    broker_order_id TEXT,
+    status TEXT NOT NULL
 )
 """
+
+_SELECT_COLUMNS = (
+    "timestamp, symbol, side, quantity, price, fee, success, "
+    "client_order_id, broker_order_id, status"
+)
 
 
 def _row_to_execution(row: tuple) -> OrderExecution:
 
-    timestamp, symbol, side, quantity, price, fee, success = row
+    (
+        timestamp,
+        symbol,
+        side,
+        quantity,
+        price,
+        fee,
+        success,
+        client_order_id,
+        broker_order_id,
+        status,
+    ) = row
     return OrderExecution(
         timestamp=datetime.fromisoformat(timestamp),
         symbol=symbol,
@@ -57,6 +89,9 @@ def _row_to_execution(row: tuple) -> OrderExecution:
         price=price,
         fee=fee,
         success=bool(success),
+        client_order_id=client_order_id,
+        broker_order_id=broker_order_id,
+        status=ExecutionStatus(status),
     )
 
 
@@ -78,15 +113,18 @@ class SqliteOrderHistory:
 
     def append(self, session_id: str, execution: OrderExecution) -> None:
         """Fügt einen Order-Ausführungs-Datensatz an (append-only, keine
-        Überschreibung bestehender Einträge)."""
+        Überschreibung bestehender Einträge). Wirft bei einer bereits
+        bekannten `client_order_id` (`sqlite3.IntegrityError`), statt die
+        Order stillschweigend doppelt zu verbuchen."""
 
         connection = self._connect()
         try:
             with connection:
                 connection.execute(
                     "INSERT INTO order_execution "
-                    "(session_id, timestamp, symbol, side, quantity, price, fee, success) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(session_id, timestamp, symbol, side, quantity, price, fee, success, "
+                    "client_order_id, broker_order_id, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         session_id,
                         execution.timestamp.isoformat(),
@@ -96,6 +134,9 @@ class SqliteOrderHistory:
                         execution.price,
                         execution.fee,
                         int(execution.success),
+                        execution.client_order_id,
+                        execution.broker_order_id,
+                        execution.status.value,
                     ),
                 )
         finally:
@@ -108,8 +149,8 @@ class SqliteOrderHistory:
         connection = self._connect()
         try:
             rows = connection.execute(
-                "SELECT timestamp, symbol, side, quantity, price, fee, success "
-                "FROM order_execution WHERE session_id = ? ORDER BY id ASC",
+                f"SELECT {_SELECT_COLUMNS} FROM order_execution "  # noqa: S608 - fester Spaltenname, kein Nutzereingabewert
+                "WHERE session_id = ? ORDER BY id ASC",
                 (session_id,),
             ).fetchall()
         finally:
@@ -124,8 +165,8 @@ class SqliteOrderHistory:
         connection = self._connect()
         try:
             row = connection.execute(
-                "SELECT timestamp, symbol, side, quantity, price, fee, success "
-                "FROM order_execution WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                f"SELECT {_SELECT_COLUMNS} FROM order_execution "  # noqa: S608 - fester Spaltenname, kein Nutzereingabewert
+                "WHERE session_id = ? ORDER BY id DESC LIMIT 1",
                 (session_id,),
             ).fetchone()
         finally:

@@ -19,6 +19,7 @@ from tradingbot.core.orchestrator import TradingOrchestrator
 from tradingbot.data.models import MarketCandle
 from tradingbot.data.simulated_provider import SimulatedDataProvider
 from tradingbot.execution.broker import PaperBroker
+from tradingbot.execution.order_repository import InMemoryOrderRepository
 from tradingbot.portfolio.manager import PortfolioManager
 from tradingbot.risk.manager import RiskManager
 from tradingbot.strategy.base import Strategy
@@ -73,6 +74,22 @@ def test_backtest_full_run_returns_result():
     assert isinstance(result.profit_loss, float)
     assert isinstance(result.performance_percent, float)
     assert isinstance(result.max_drawdown_percent, float)
+
+
+def test_backtest_orchestrator_without_order_repository_stays_in_memory():
+    """Backtest-Aufrufer übergeben `order_repository` nicht (siehe
+    `_build_engine` oben, identisch zu `backtest/research.py` und
+    `backtest/portfolio_engine.py`) - der TradingOrchestrator muss dabei
+    weiterhin automatisch beim In-Memory-Standard bleiben, ohne jede
+    SQLite-Interaktion."""
+
+    backtest, _, _ = _build_engine(SimpleStrategy(), candle_count=10)
+
+    assert isinstance(backtest._orchestrator._order_manager._repository, InMemoryOrderRepository)
+
+    result = backtest.run()
+
+    assert result.trades >= 0  # Backtest läuft unverändert vollständig durch.
 
 
 def test_backtest_no_lookahead_bias():

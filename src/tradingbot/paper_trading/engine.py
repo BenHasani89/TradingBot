@@ -277,6 +277,9 @@ class PaperTradingEngine:
                 price=order.price,
                 fee=result.execution.fee,
                 success=result.execution.success,
+                client_order_id=order.client_order_id,
+                broker_order_id=result.execution.broker_order_id,
+                status=result.execution.status,
             ),
         )
 
