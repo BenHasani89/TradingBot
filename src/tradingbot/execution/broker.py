@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+
 from tradingbot.execution.models import (
     ExecutionResult,
     Order,
 )
 
 
-class PaperBroker:
+class Broker(ABC):
+    """Abstrakte Ausführungsschnittstelle.
+
+    Einzige Verantwortung: eine Order entgegennehmen und ein
+    `ExecutionResult` liefern. Enthält bewusst keine Börsen-spezifische
+    Logik (keine Gebühren-/Slippage-Annahmen, kein Balance-/Positions-
+    Abgleich) - das bleibt Sache der jeweiligen Implementierung
+    (`PaperBroker`, künftig z. B. `LiveBroker`).
+    """
+
+    @abstractmethod
+    def execute(self, order: Order) -> ExecutionResult:
+        """Führt eine Order aus und liefert das Ergebnis."""
+
+
+class PaperBroker(Broker):
     """Simulierter Broker ohne echtes Geld.
 
     `fee_percent` und `slippage_percent` sind Anteile (z. B. `0.001` für

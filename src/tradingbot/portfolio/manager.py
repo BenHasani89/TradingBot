@@ -39,6 +39,26 @@ class PortfolioManager:
             positions=self._positions,
         )
 
+    def export_state(self) -> PortfolioStatus:
+        """Exportiert den aktuellen Zustand für die Persistenz.
+
+        Bildet die Persistenz-Grenze: eine externe Persistence-Schicht darf
+        ausschliesslich über diese Methode (und `restore_state()`) mit dem
+        `PortfolioManager` interagieren - niemals über interne Attribute.
+        """
+
+        return self.status()
+
+    def restore_state(self, state: PortfolioStatus) -> None:
+        """Setzt Kapital und Positionen auf den übergebenen Zustand zurück.
+
+        Gegenstück zu `export_state()` - für den Wiederanlauf nach einem
+        Neustart (Zustand laden, `PortfolioManager` fortsetzen).
+        """
+
+        self._capital = state.capital
+        self._positions = list(state.positions)
+
     def available_cash(self) -> float:
         """Gibt das aktuell verfügbare Kapital (Cash) zurück.
 
