@@ -156,38 +156,61 @@ class TradingOrchestrator:
         if execution.success:
             filled_order = execution.order
 
-            # Portfolio kennt weder Gebühren noch Slippage (unveränderte
-            # Schnittstelle) - daher wird hier ein einzelner effektiver
-            # Preis gebildet, der Fill-Preis (bereits inkl. Slippage) und
-            # Gebühr zu einem korrekten Netto-Kapitaleffekt zusammenfasst.
-            # Gebühr/Slippage bleiben trotzdem separat im ExecutionResult
-            # sichtbar (siehe execution.fee / execution.slippage).
-            if filled_order.side == "BUY":
-                total_cash_impact = (
-                    filled_order.price * filled_order.quantity + execution.fee
+            # Gebucht wird die tatsächlich gefüllte Menge, nicht die
+            # angefragte: execution.filled_quantity ist None bei Brokern
+            # ohne Teilausführungs-Unterscheidung (PaperBroker/
+            # MockLiveBroker - "Legacy", siehe
+            # execution.models.derive_order_status()) und entspricht dann
+            # weiterhin filled_order.quantity. Ein LiveBroker mit echtem
+            # Partial Fill liefert hier die reale, kleinere Menge.
+            actual_quantity = (
+                execution.filled_quantity
+                if execution.filled_quantity is not None
+                else filled_order.quantity
+            )
+
+            # Sicherheitsnetz gegen eine widersprüchliche Broker-Antwort
+            # (success=True bei filled_quantity<=0): ein korrekt
+            # implementierter Broker liefert in diesem Fall bereits
+            # success=False (siehe execution/live_broker.py), aber dieser
+            # Vertrag ist nicht auf der Broker-ABC erzwungen. Ohne diese
+            # Prüfung würde effective_price weiter unten durch 0 teilen und
+            # ein Trade mit Nullmenge gebucht.
+            if actual_quantity <= 0:
+                logger.error(
+                    "Execution meldet success=True bei filled_quantity={} - "
+                    "kein Trade gebucht (widersprüchliche Broker-Antwort).",
+                    actual_quantity,
                 )
             else:
-                total_cash_impact = (
-                    filled_order.price * filled_order.quantity - execution.fee
-                )
-            effective_price = total_cash_impact / filled_order.quantity
+                # Portfolio kennt weder Gebühren noch Slippage (unveränderte
+                # Schnittstelle) - daher wird hier ein einzelner effektiver
+                # Preis gebildet, der Fill-Preis (bereits inkl. Slippage) und
+                # Gebühr zu einem korrekten Netto-Kapitaleffekt zusammenfasst.
+                # Gebühr/Slippage bleiben trotzdem separat im ExecutionResult
+                # sichtbar (siehe execution.fee / execution.slippage).
+                if filled_order.side == "BUY":
+                    total_cash_impact = filled_order.price * actual_quantity + execution.fee
+                else:
+                    total_cash_impact = filled_order.price * actual_quantity - execution.fee
+                effective_price = total_cash_impact / actual_quantity
 
-            closed_trade = self._portfolio.apply_trade(
-                symbol=filled_order.symbol,
-                side=filled_order.side,
-                quantity=filled_order.quantity,
-                price=effective_price,
-            )
-            logger.info(
-                "Trade gebucht: {} {} {} @ {} (Fill {}, Gebühr {}, Slippage {})",
-                filled_order.side,
-                filled_order.quantity,
-                filled_order.symbol,
-                effective_price,
-                filled_order.price,
-                execution.fee,
-                execution.slippage,
-            )
+                closed_trade = self._portfolio.apply_trade(
+                    symbol=filled_order.symbol,
+                    side=filled_order.side,
+                    quantity=actual_quantity,
+                    price=effective_price,
+                )
+                logger.info(
+                    "Trade gebucht: {} {} {} @ {} (Fill {}, Gebühr {}, Slippage {})",
+                    filled_order.side,
+                    actual_quantity,
+                    filled_order.symbol,
+                    effective_price,
+                    filled_order.price,
+                    execution.fee,
+                    execution.slippage,
+                )
 
         return TradingCycleResult(
             signal=signal,

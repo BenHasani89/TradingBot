@@ -45,6 +45,16 @@ versehentlich zu setzen, keine CLI-/Konfigurationsoption dafür (siehe
 
 _LIVE_API_KEY_ENV_VAR = "TRADINGBOT_LIVE_API_KEY"
 _LIVE_API_SECRET_ENV_VAR = "TRADINGBOT_LIVE_API_SECRET"  # noqa: S105 - Name der ENV-Variable, kein Geheimnis selbst
+_LIVE_ENVIRONMENT_ENV_VAR = "TRADINGBOT_LIVE_ENVIRONMENT"
+
+_LIVE_BASE_URLS = {
+    "testnet": "https://testnet.binance.vision",
+    "production": "https://api.binance.com",
+}
+"""Binance Spot – erster echter Exchange-Adapter (siehe execution/live_broker.py).
+Fehlt `TRADINGBOT_LIVE_ENVIRONMENT` oder hat einen unbekannten Wert, schlägt
+`_build_live_broker()` fehl statt still auf einen der beiden Werte
+zurückzufallen."""
 
 _STRATEGIES: dict[str, type[Strategy]] = {
     "simple": SimpleStrategy,
@@ -84,13 +94,12 @@ def _build_live_broker(
     config: RuntimeConfig, scenario_provider: ScenarioProvider | None, live_confirmation: str | None
 ) -> Broker:
     """Baut einen `LiveBroker` - erst nach expliziter Bestätigung und nur
-    mit vollständigen Credentials.
+    mit vollständigen Credentials und einer gültigen Umgebung.
 
-    `execute()`/`get_order_status()` des zurückgegebenen `LiveBroker` werfen
-    `NotImplementedError` (keine Exchange-Anbindung, siehe
-    `execution/live_broker.py`) - diese Factory stellt sicher, dass ein
-    `LiveBroker` überhaupt nur mit Bestätigung *und* Credentials entsteht,
-    unabhängig davon.
+    Der zurückgegebene `LiveBroker` führt echte Binance-Spot-Market-Orders
+    aus (siehe `execution/live_broker.py`) - diese Factory stellt sicher,
+    dass er überhaupt nur mit Bestätigungsphrase *und* vollständigen
+    Credentials *und* gültiger `TRADINGBOT_LIVE_ENVIRONMENT` entsteht.
     """
 
     if live_confirmation != LIVE_CONFIRMATION_PHRASE:
@@ -109,13 +118,22 @@ def _build_live_broker(
             "Credentials werden nie in RuntimeConfig/Config-Dateien gespeichert."
         )
 
-    return LiveBroker(api_key=api_key, api_secret=api_secret)
+    environment = os.environ.get(_LIVE_ENVIRONMENT_ENV_VAR)
+    if environment not in _LIVE_BASE_URLS:
+        raise ValueError(
+            f"RuntimeMode.LIVE erfordert die Umgebungsvariable {_LIVE_ENVIRONMENT_ENV_VAR!r} "
+            f"mit dem Wert 'testnet' oder 'production' - aktueller Wert: {environment!r}. "
+            "Kein stiller Rückfall auf einen der beiden Werte."
+        )
+
+    return LiveBroker(api_key=api_key, api_secret=api_secret, base_url=_LIVE_BASE_URLS[environment])
 
 
-# RuntimeMode.LIVE ist registriert, damit das vollständige Sicherheits-Gate
-# (Bestätigungsphrase + Credential-Prüfung) end-to-end testbar ist - der
-# zurückgegebene LiveBroker kann aber keine echte Order ausführen
-# (NotImplementedError, siehe execution/live_broker.py). Kein Rückfall auf
+# RuntimeMode.LIVE ist registriert und führt über den zurückgegebenen
+# LiveBroker echte Binance-Spot-Market-Orders aus (siehe
+# execution/live_broker.py) - deshalb ausschliesslich hinter dem
+# vollständigen Sicherheits-Gate aus Bestätigungsphrase, Credential-Prüfung
+# und Environment-Prüfung (siehe _build_live_broker). Kein Rückfall auf
 # einen anderen Broker, kein stilles Umschalten.
 _BROKER_FACTORIES: dict[
     RuntimeMode, Callable[[RuntimeConfig, ScenarioProvider | None, str | None], Broker]

@@ -1,5 +1,7 @@
+import httpx
 import pytest
 
+import tradingbot.execution.live_broker as live_broker_module
 from tradingbot.cli import composition
 from tradingbot.cli.config import RuntimeMode, build_config
 from tradingbot.execution.broker import PaperBroker
@@ -217,12 +219,53 @@ def test_build_engine_live_mode_confirmed_but_missing_credentials_raises(tmp_pat
         )
 
 
+def test_build_engine_live_mode_confirmed_with_credentials_but_missing_environment_raises(
+    tmp_path, monkeypatch
+):
+
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_KEY", "key")
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_SECRET", "secret")
+    monkeypatch.delenv("TRADINGBOT_LIVE_ENVIRONMENT", raising=False)
+    config = _config(tmp_path, mode=RuntimeMode.LIVE)
+
+    with pytest.raises(ValueError, match="TRADINGBOT_LIVE_ENVIRONMENT"):
+        composition.build_engine(
+            config, live_confirmation=composition.LIVE_CONFIRMATION_PHRASE
+        )
+
+
+def _patch_binance_http(monkeypatch, handler) -> None:
+    """Ersetzt die von `LiveBroker` intern konstruierte `httpx.Client`-
+    Instanz durch eine, die über `httpx.MockTransport` läuft - kein echter
+    Netzwerkzugriff in der Testsuite, auch nicht für den Zeit-Sync beim
+    Konstruktor.
+
+    `live_broker_module.httpx` ist dasselbe Modulobjekt wie das hier
+    importierte `httpx` - der echte `httpx.Client` wird deshalb vor dem
+    Patchen separat gesichert, sonst würde `_fake_client` sich selbst
+    rekursiv aufrufen."""
+
+    real_client_class = httpx.Client
+
+    def _fake_client(**kwargs):
+        return real_client_class(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(live_broker_module.httpx, "Client", _fake_client)
+
+
+def _time_only_handler(request: httpx.Request) -> httpx.Response:
+    assert request.url.path == "/api/v3/time"
+    return httpx.Response(200, json={"serverTime": 1700000000000})
+
+
 def test_build_engine_live_mode_confirmed_with_credentials_builds_live_broker(
     tmp_path, monkeypatch
 ):
 
     monkeypatch.setenv("TRADINGBOT_LIVE_API_KEY", "key")
     monkeypatch.setenv("TRADINGBOT_LIVE_API_SECRET", "secret")
+    monkeypatch.setenv("TRADINGBOT_LIVE_ENVIRONMENT", "testnet")
+    _patch_binance_http(monkeypatch, _time_only_handler)
     config = _config(tmp_path, mode=RuntimeMode.LIVE)
 
     engine, _ = composition.build_engine(
@@ -232,13 +275,34 @@ def test_build_engine_live_mode_confirmed_with_credentials_builds_live_broker(
     assert isinstance(engine._orchestrator._broker, LiveBroker)
 
 
-def test_build_engine_live_mode_broker_cannot_execute_real_trades(tmp_path, monkeypatch):
-    """Selbst mit vollständiger Bestätigung + Credentials kann in dieser
-    Phase keine echte Order ausgeführt werden - kontrollierter
-    NotImplementedError, von der bestehenden Fehlerbehandlung abgefangen."""
+def test_build_engine_live_mode_executes_trade_via_mocked_binance(tmp_path, monkeypatch):
+    """Volles Zusammenspiel gegen eine simulierte Binance-Antwort - kein
+    echter Netzwerkzugriff, aber derselbe Codepfad wie im echten Betrieb."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            return httpx.Response(200, json={"serverTime": 1700000000000})
+        if request.url.path == "/api/v3/order":
+            return httpx.Response(
+                200,
+                json={
+                    "symbol": "BTCUSDT",
+                    "orderId": 1,
+                    "clientOrderId": "test",
+                    "status": "FILLED",
+                    "executedQty": "0.01",
+                    "cummulativeQuoteQty": "500.0",
+                    "fills": [
+                        {"price": "50000.0", "qty": "0.01", "commission": "0.5"}
+                    ],
+                },
+            )
+        raise AssertionError(f"Unerwarteter Aufruf: {request.url.path}")
 
     monkeypatch.setenv("TRADINGBOT_LIVE_API_KEY", "key")
     monkeypatch.setenv("TRADINGBOT_LIVE_API_SECRET", "secret")
+    monkeypatch.setenv("TRADINGBOT_LIVE_ENVIRONMENT", "testnet")
+    _patch_binance_http(monkeypatch, handler)
     config = _config(
         tmp_path, session_id="session-1", candle_limit=5, mode=RuntimeMode.LIVE
     )
@@ -250,11 +314,9 @@ def test_build_engine_live_mode_broker_cannot_execute_real_trades(tmp_path, monk
 
     result = engine.run_cycle_once()
 
-    assert result is None  # CYCLE_ERROR abgefangen, kein Absturz
-    assert engine.health().last_error is not None
-    assert "NotImplementedError" in engine.health().last_error or "Exchange" in str(
-        engine.health().last_error
-    )
+    assert result is not None
+    assert result.execution is not None
+    assert result.execution.success is True
 
 
 def test_build_engine_paper_mode_ignores_scenario_provider(tmp_path):

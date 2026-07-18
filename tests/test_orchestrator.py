@@ -5,8 +5,8 @@ import pytest
 from tradingbot.core.engine import TradingEngine
 from tradingbot.core.orchestrator import TradingOrchestrator
 from tradingbot.data.models import MarketCandle
-from tradingbot.execution.broker import PaperBroker
-from tradingbot.execution.models import OrderStatus
+from tradingbot.execution.broker import Broker, PaperBroker
+from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order, OrderStatus
 from tradingbot.execution.order_repository import InMemoryOrderRepository
 from tradingbot.portfolio.manager import PortfolioManager
 from tradingbot.risk.manager import RiskManager
@@ -181,3 +181,144 @@ def test_orchestrator_uses_the_exact_injected_repository_instance_not_a_copy():
     )
 
     assert orchestrator._order_manager._repository is injected_repository
+
+
+# --- Partial Fill: Portfolio-Buchung nutzt die tatsächlich gefüllte Menge --------------------
+
+
+class _PartialFillBroker(Broker):
+    """Füllt jede Order nur zu einem festen Anteil - simuliert einen
+    echten Partial Fill unabhängig von einer konkreten Exchange."""
+
+    def __init__(self, fill_ratio: float) -> None:
+        self._fill_ratio = fill_ratio
+
+    def execute(self, order: Order) -> ExecutionResult:
+        return ExecutionResult(
+            success=True,
+            order=order,
+            message="Teilweise gefüllt",
+            fee=0.0,
+            slippage=0.0,
+            status=ExecutionStatus.SUCCESS,
+            broker_order_id=order.client_order_id,
+            filled_quantity=order.quantity * self._fill_ratio,
+        )
+
+    def get_order_status(self, client_order_id: str) -> ExecutionResult | None:
+        return None
+
+
+class _ZeroFillBroker(Broker):
+    """Meldet `success=False` bei `filled_quantity=0.0` - so muss ein
+    Broker sich verhalten, damit `derive_order_status()`s FAILED-Fall und
+    `ExecutionResult.success` konsistent bleiben (siehe
+    `execution/live_broker.py`)."""
+
+    def execute(self, order: Order) -> ExecutionResult:
+        return ExecutionResult(
+            success=False,
+            order=order,
+            message="Nichts gefüllt",
+            fee=0.0,
+            slippage=0.0,
+            status=ExecutionStatus.SUCCESS,
+            filled_quantity=0.0,
+        )
+
+    def get_order_status(self, client_order_id: str) -> ExecutionResult | None:
+        return None
+
+
+def test_run_cycle_books_only_actually_filled_quantity_on_partial_fill():
+
+    engine = TradingEngine()
+    portfolio = PortfolioManager(initial_capital=10000.0)
+    orchestrator = TradingOrchestrator(
+        engine=engine,
+        strategy=SimpleStrategy(),
+        risk_manager=RiskManager(max_position_size=1000.0),
+        portfolio=portfolio,
+        broker=_PartialFillBroker(fill_ratio=0.4),
+    )
+    engine.start()
+
+    result = orchestrator.run_cycle(_candles(100, 110))
+
+    requested_quantity = 1000.0 / 110
+    expected_filled = requested_quantity * 0.4
+
+    assert result.execution.filled_quantity == pytest.approx(expected_filled)
+    status = portfolio.status()
+    assert len(status.positions) == 1
+    assert status.positions[0].quantity == pytest.approx(expected_filled)
+    # Kapital wird nur für die tatsächlich gefüllte Menge reduziert, nicht
+    # für die ursprünglich angefragte.
+    assert status.capital == pytest.approx(10000.0 - expected_filled * 110.0)
+
+
+class _ContradictoryZeroFillBroker(Broker):
+    """Verletzt bewusst den Vertrag `filled_quantity==0 => success=False`
+    (z. B. eine denkbare Fehlkonfiguration eines künftigen Brokers) - dient
+    ausschliesslich dazu, TradingOrchestrators Sicherheitsnetz gegen genau
+    diesen Widerspruch zu prüfen (siehe core/orchestrator.py)."""
+
+    def execute(self, order: Order) -> ExecutionResult:
+        return ExecutionResult(
+            success=True,
+            order=order,
+            message="Widersprüchlich: success=True trotz filled_quantity=0",
+            fee=0.0,
+            slippage=0.0,
+            status=ExecutionStatus.SUCCESS,
+            broker_order_id=order.client_order_id,
+            filled_quantity=0.0,
+        )
+
+    def get_order_status(self, client_order_id: str) -> ExecutionResult | None:
+        return None
+
+
+def test_run_cycle_does_not_divide_by_zero_when_broker_contradicts_itself():
+    """success=True kombiniert mit filled_quantity=0.0 darf weder eine
+    ZeroDivisionError auslösen noch einen Trade buchen - ein korrekter
+    Broker sendet diese Kombination nie (siehe execution/live_broker.py),
+    aber TradingOrchestrator darf sich nicht darauf verlassen."""
+
+    engine = TradingEngine()
+    portfolio = PortfolioManager(initial_capital=10000.0)
+    orchestrator = TradingOrchestrator(
+        engine=engine,
+        strategy=SimpleStrategy(),
+        risk_manager=RiskManager(max_position_size=1000.0),
+        portfolio=portfolio,
+        broker=_ContradictoryZeroFillBroker(),
+    )
+    engine.start()
+
+    result = orchestrator.run_cycle(_candles(100, 110))
+
+    assert result.execution.success is True
+    assert result.closed_trade is None
+    assert portfolio.status().positions == []
+    assert portfolio.status().capital == pytest.approx(10000.0)
+
+
+def test_run_cycle_does_not_book_when_nothing_was_filled():
+
+    engine = TradingEngine()
+    portfolio = PortfolioManager(initial_capital=10000.0)
+    orchestrator = TradingOrchestrator(
+        engine=engine,
+        strategy=SimpleStrategy(),
+        risk_manager=RiskManager(max_position_size=1000.0),
+        portfolio=portfolio,
+        broker=_ZeroFillBroker(),
+    )
+    engine.start()
+
+    result = orchestrator.run_cycle(_candles(100, 110))
+
+    assert result.execution.success is False
+    assert portfolio.status().positions == []
+    assert portfolio.status().capital == pytest.approx(10000.0)

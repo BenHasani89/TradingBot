@@ -16,17 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from tradingbot.execution.broker import Broker
-from tradingbot.execution.models import ExecutionStatus, OrderStatus
+from tradingbot.execution.models import ExecutionStatus, OrderStatus, derive_order_status
 from tradingbot.execution.order_repository import OrderRepository
-
-_EXPECTED_LOCAL_STATUS_FOR_BROKER_STATUS = {
-    ExecutionStatus.SUCCESS: OrderStatus.FILLED,
-    ExecutionStatus.FAILED: OrderStatus.FAILED,
-    ExecutionStatus.UNKNOWN: OrderStatus.UNKNOWN,
-}
-"""Mirror der Zuordnung aus `execution.order_manager` - welchen lokalen
-`OrderStatus` ein bestimmter Broker-`ExecutionStatus` erwarten lässt, wenn
-lokaler und Broker-Zustand übereinstimmen."""
 
 _PENDING_STATUSES = {OrderStatus.CREATED, OrderStatus.SUBMITTED, OrderStatus.UNKNOWN}
 """Status, die noch kein vom Broker direkt bestätigtes Endergebnis tragen -
@@ -110,7 +101,11 @@ class ReconciliationService:
             )
 
         broker_status = broker_result.status
-        expected_local_status = _EXPECTED_LOCAL_STATUS_FOR_BROKER_STATUS[broker_status]
+        # Nutzt dieselbe Ableitung wie OrderManager (inkl. filled_quantity,
+        # z. B. FILLED vs. PARTIALLY_FILLED) statt einer eigenen, separat
+        # gepflegten Zuordnung - garantiert identische Logik auf beiden
+        # Seiten (siehe execution.models.derive_order_status()).
+        expected_local_status = derive_order_status(broker_result)
 
         if record.status == expected_local_status:
             return ReconciliationResult(

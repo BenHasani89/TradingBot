@@ -14,14 +14,14 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from tradingbot.execution.broker import Broker
-from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order, OrderStatus
+from tradingbot.execution.models import (
+    ExecutionResult,
+    ExecutionStatus,
+    Order,
+    OrderStatus,
+    derive_order_status,
+)
 from tradingbot.execution.order_repository import OrderRecord, OrderRepository
-
-_EXECUTION_TO_ORDER_STATUS = {
-    ExecutionStatus.SUCCESS: OrderStatus.FILLED,
-    ExecutionStatus.FAILED: OrderStatus.FAILED,
-    ExecutionStatus.UNKNOWN: OrderStatus.UNKNOWN,
-}
 
 
 class OrderManager:
@@ -55,7 +55,8 @@ class OrderManager:
 
         Andernfalls: Order als `CREATED`, dann `SUBMITTED` speichern,
         Broker aufrufen, Ergebnis speichern und Status auf den
-        entsprechenden Endzustand (`FILLED`/`FAILED`/`UNKNOWN`)
+        entsprechenden Endzustand (`FILLED`/`PARTIALLY_FILLED`/`FAILED`/
+        `UNKNOWN`, siehe `execution.models.derive_order_status()`)
         aktualisieren. Wirft der Broker-Aufruf selbst eine Exception, bleibt
         der zuletzt gespeicherte Zustand bei `SUBMITTED` stehen - genau das
         signalisiert einer künftigen Reconciliation "Ausgang unklar".
@@ -91,7 +92,7 @@ class OrderManager:
             OrderRecord(
                 client_order_id=order.client_order_id,
                 order=order,
-                status=_EXECUTION_TO_ORDER_STATUS[execution_result.status],
+                status=derive_order_status(execution_result),
                 created_at=created_at,
                 updated_at=self._now(),
                 execution_result=execution_result,

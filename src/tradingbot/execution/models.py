@@ -43,13 +43,12 @@ class OrderStatus(Enum):
     keinem Code gesetzt (keine neue Broker-Methode, siehe
     `execution/broker.py`).
 
-    `PARTIALLY_FILLED` ist - genau wie `CANCELLED` - reine Modell-
-    Vorbereitung: kein Code leitet diesen Status aktuell automatisch aus
-    `ExecutionResult.filled_quantity` ab. Ein `ExecutionResult(status=
-    SUCCESS, filled_quantity=<Teilmenge>)` resultiert im `OrderManager`
-    weiterhin in `FILLED`, nicht in `PARTIALLY_FILLED` - die automatische
-    Ableitung sowie die Portfolio-Buchungslogik für Teilausführungen sind
-    bewusst einer eigenen, späteren Phase vorbehalten.
+    `PARTIALLY_FILLED` wird automatisch aus `ExecutionResult.filled_quantity`
+    abgeleitet (siehe `derive_order_status()`) - ein `ExecutionResult(status=
+    SUCCESS, filled_quantity=<Teilmenge>)` resultiert in `PARTIALLY_FILLED`,
+    nicht in `FILLED`. `CANCELLED` bleibt weiterhin reine Modell-
+    Vorbereitung - kein Code setzt ihn (keine `cancel_order()`-Methode,
+    Market-Orders hinterlassen keinen offenen Rest im Orderbuch).
     """
 
     CREATED = "created"
@@ -103,11 +102,14 @@ class ExecutionResult:
     Ersetzung. `broker_order_id` ist die vom Broker (nicht vom Aufrufer)
     vergebene Kennung, `None` wenn keine vergeben wurde.
 
-    `filled_quantity` ist `None`, wenn nicht anwendbar bzw. vollständig
-    gefüllt; ein numerischer Wert kleiner als `order.quantity` bedeutet
-    eine Teilausführung (Partial Fill). Reine Modell-Vorbereitung: weder
-    `OrderManager` noch `PortfolioManager`/`apply_trade()` werten dieses
-    Feld aktuell aus - siehe `OrderStatus.PARTIALLY_FILLED`.
+    `filled_quantity` ist `None`, wenn der Broker keine Teilausführung
+    unterscheidet (z. B. `PaperBroker`/`MockLiveBroker` - "Legacy"-Fall,
+    siehe `derive_order_status()`); ein numerischer Wert bedeutet, dass der
+    Broker die tatsächlich gefüllte Menge kennt - `0.0` heisst "nichts
+    gefüllt" (wird wie ein Fehlschlag behandelt), ein Wert kleiner als
+    `order.quantity` bedeutet eine echte Teilausführung. `OrderManager`
+    und `PortfolioManager`/`apply_trade()` (über `TradingOrchestrator`)
+    werten dieses Feld aus - siehe `OrderStatus.PARTIALLY_FILLED`.
     """
 
     success: bool
@@ -118,3 +120,38 @@ class ExecutionResult:
     status: ExecutionStatus = ExecutionStatus.SUCCESS
     broker_order_id: str | None = None
     filled_quantity: float | None = None
+
+
+def derive_order_status(execution_result: ExecutionResult) -> OrderStatus:
+    """Leitet den `OrderStatus` aus einem `ExecutionResult` ab - einzige
+    Stelle, die `filled_quantity` in einen Lifecycle-Status übersetzt.
+    Gemeinsam verwendet von `OrderManager` (Statuspflege nach `execute()`)
+    und `ReconciliationService` (Vergleich gegen den lokalen Status), damit
+    beide garantiert dieselbe Logik anwenden.
+
+    `ExecutionStatus.FAILED`/`UNKNOWN` übersetzen sich direkt in
+    `OrderStatus.FAILED`/`UNKNOWN`, unabhängig von `filled_quantity`. Für
+    `ExecutionStatus.SUCCESS`:
+
+    - `filled_quantity is None` ("Legacy", z. B. `PaperBroker`/
+      `MockLiveBroker`, die nie zwischen ganz und teilweise unterscheiden)
+      -> `FILLED`, unverändertes Verhalten.
+    - `filled_quantity == 0` -> `FAILED` (nichts wurde tatsächlich
+      gehandelt, unabhängig vom formalen Erfolg der Anfrage).
+    - `0 < filled_quantity < order.quantity` -> `PARTIALLY_FILLED`.
+    - `filled_quantity >= order.quantity` -> `FILLED`.
+    """
+
+    if execution_result.status == ExecutionStatus.FAILED:
+        return OrderStatus.FAILED
+    if execution_result.status == ExecutionStatus.UNKNOWN:
+        return OrderStatus.UNKNOWN
+
+    filled_quantity = execution_result.filled_quantity
+    if filled_quantity is None:
+        return OrderStatus.FILLED
+    if filled_quantity == 0:
+        return OrderStatus.FAILED
+    if filled_quantity < execution_result.order.quantity:
+        return OrderStatus.PARTIALLY_FILLED
+    return OrderStatus.FILLED

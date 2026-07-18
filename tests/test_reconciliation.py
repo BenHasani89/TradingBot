@@ -255,3 +255,46 @@ def test_reconcile_pending_with_no_pending_orders_returns_empty_list():
     )
 
     assert service.reconcile_pending() == []
+
+
+# --- Partial-Fill-Mapping --------------------------------------------------------------------
+
+
+def _partial_broker_result(client_order_id: str, filled_quantity: float) -> ExecutionResult:
+
+    return ExecutionResult(
+        success=True,
+        order=_order(client_order_id),
+        message="Teilweise gefüllt",
+        fee=0.0,
+        slippage=0.0,
+        status=ExecutionStatus.SUCCESS,
+        broker_order_id=client_order_id,
+        filled_quantity=filled_quantity,
+    )
+
+
+def test_reconcile_order_local_partially_filled_matches_broker_partial_fill():
+
+    repository = InMemoryOrderRepository()
+    repository.save(_local_record("order-1", OrderStatus.PARTIALLY_FILLED))
+    service = _service(
+        repository, broker_statuses={"order-1": _partial_broker_result("order-1", 0.04)}
+    )
+
+    result = service.reconcile_order("order-1")
+
+    assert result.matched is True
+
+
+def test_reconcile_order_local_filled_but_broker_reports_partial_is_mismatch():
+
+    repository = InMemoryOrderRepository()
+    repository.save(_local_record("order-1", OrderStatus.FILLED))
+    service = _service(
+        repository, broker_statuses={"order-1": _partial_broker_result("order-1", 0.04)}
+    )
+
+    result = service.reconcile_order("order-1")
+
+    assert result.matched is False

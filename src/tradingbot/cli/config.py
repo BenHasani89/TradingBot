@@ -24,11 +24,14 @@ class RuntimeMode(Enum):
     kein `PaperTradingEngine`, siehe `backtest/`) und hat deshalb bewusst
     keinen `RuntimeMode`-Wert.
 
-    `LIVE` ist architektonisch vorbereitet, aber in `cli/composition.py`
-    aktuell nicht als Broker-Factory registriert - es existiert noch kein
-    `LiveBroker`. Diesen Modus zu wählen schlägt deshalb bewusst mit einem
+    `LIVE` ist in `cli/composition.py` als Broker-Factory registriert und
+    führt über den `LiveBroker` echte Binance-Spot-Market-Orders aus (siehe
+    `execution/live_broker.py`) - ausschliesslich hinter dem vollständigen
+    Sicherheits-Gate (exakte Bestätigungsphrase, vollständige Credentials,
+    gültige `TRADINGBOT_LIVE_ENVIRONMENT`; siehe `_build_live_broker`).
+    Fehlt eine dieser Voraussetzungen, schlägt der Aufbau bewusst mit einem
     klaren Fehler fehl, statt still auf einen anderen Broker
-    zurückzufallen oder echtes Live-Trading zu ermöglichen.
+    zurückzufallen.
     """
 
     PAPER = "paper"

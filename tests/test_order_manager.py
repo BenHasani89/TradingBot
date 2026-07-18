@@ -269,3 +269,58 @@ def test_created_at_stays_stable_while_updated_at_advances_within_one_submit():
     record = repository.get(order.client_order_id)
     assert record.created_at == _NOW
     assert record.updated_at == later
+
+
+# --- Partial Fill ---------------------------------------------------------------------------
+
+
+def _partial_fill_result(order: Order) -> ExecutionResult:
+
+    return ExecutionResult(
+        success=True,
+        order=order,
+        message="Teilweise gefüllt",
+        fee=0.05,
+        slippage=0.0,
+        status=ExecutionStatus.SUCCESS,
+        broker_order_id=order.client_order_id,
+        filled_quantity=order.quantity * 0.4,
+    )
+
+
+def test_submit_partial_fill_persists_partially_filled_status():
+
+    broker = _FixedResultBroker(_partial_fill_result)
+    repository = InMemoryOrderRepository()
+    manager = OrderManager(broker=broker, repository=repository)
+    order = _order()
+
+    result = manager.submit(order)
+
+    assert result.filled_quantity == pytest.approx(order.quantity * 0.4)
+    record = repository.get(order.client_order_id)
+    assert record.status == OrderStatus.PARTIALLY_FILLED
+
+
+def test_submit_success_with_zero_filled_quantity_persists_failed_status():
+
+    def _zero_fill_result(order: Order) -> ExecutionResult:
+        return ExecutionResult(
+            success=False,
+            order=order,
+            message="Nichts gefüllt",
+            fee=0.0,
+            slippage=0.0,
+            status=ExecutionStatus.SUCCESS,
+            filled_quantity=0.0,
+        )
+
+    broker = _FixedResultBroker(_zero_fill_result)
+    repository = InMemoryOrderRepository()
+    manager = OrderManager(broker=broker, repository=repository)
+    order = _order()
+
+    manager.submit(order)
+
+    record = repository.get(order.client_order_id)
+    assert record.status == OrderStatus.FAILED

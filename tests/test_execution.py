@@ -1,5 +1,11 @@
 from tradingbot.execution.broker import Broker, PaperBroker
-from tradingbot.execution.models import ExecutionStatus, Order
+from tradingbot.execution.models import (
+    ExecutionResult,
+    ExecutionStatus,
+    Order,
+    OrderStatus,
+    derive_order_status,
+)
 
 
 def test_paper_broker_is_a_broker():
@@ -110,3 +116,69 @@ def test_get_order_status_is_independent_across_orders():
 
     assert broker.get_order_status(first.client_order_id) is not None
     assert broker.get_order_status(second.client_order_id) is None
+
+
+# --- derive_order_status() ---------------------------------------------------------------
+
+
+def _result(
+    status: ExecutionStatus, filled_quantity: float | None, quantity: float = 1.0
+) -> ExecutionResult:
+
+    order = Order(symbol="BTCUSDT", side="BUY", quantity=quantity, price=100.0)
+    return ExecutionResult(
+        success=status == ExecutionStatus.SUCCESS,
+        order=order,
+        message="Test",
+        fee=0.0,
+        slippage=0.0,
+        status=status,
+        filled_quantity=filled_quantity,
+    )
+
+
+def test_derive_order_status_failed_ignores_filled_quantity():
+
+    assert derive_order_status(_result(ExecutionStatus.FAILED, None)) == OrderStatus.FAILED
+    assert derive_order_status(_result(ExecutionStatus.FAILED, 0.5)) == OrderStatus.FAILED
+
+
+def test_derive_order_status_unknown_ignores_filled_quantity():
+
+    assert derive_order_status(_result(ExecutionStatus.UNKNOWN, None)) == OrderStatus.UNKNOWN
+    assert derive_order_status(_result(ExecutionStatus.UNKNOWN, 0.5)) == OrderStatus.UNKNOWN
+
+
+def test_derive_order_status_success_with_none_is_legacy_filled():
+
+    result = derive_order_status(_result(ExecutionStatus.SUCCESS, None))
+
+    assert result == OrderStatus.FILLED
+
+
+def test_derive_order_status_success_with_zero_filled_is_failed():
+
+    result = derive_order_status(_result(ExecutionStatus.SUCCESS, 0.0, quantity=1.0))
+
+    assert result == OrderStatus.FAILED
+
+
+def test_derive_order_status_success_partial_fill():
+
+    result = derive_order_status(_result(ExecutionStatus.SUCCESS, 0.4, quantity=1.0))
+
+    assert result == OrderStatus.PARTIALLY_FILLED
+
+
+def test_derive_order_status_success_full_fill():
+
+    result = derive_order_status(_result(ExecutionStatus.SUCCESS, 1.0, quantity=1.0))
+
+    assert result == OrderStatus.FILLED
+
+
+def test_derive_order_status_success_overfill_is_still_filled():
+
+    result = derive_order_status(_result(ExecutionStatus.SUCCESS, 1.2, quantity=1.0))
+
+    assert result == OrderStatus.FILLED
