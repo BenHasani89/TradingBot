@@ -1,7 +1,9 @@
 import pytest
 
 from tradingbot.cli import composition
-from tradingbot.cli.config import build_config
+from tradingbot.cli.config import RuntimeMode, build_config
+from tradingbot.execution.broker import PaperBroker
+from tradingbot.execution.mock_broker import MockExecutionScenario, MockLiveBroker, MockOutcome
 from tradingbot.execution.models import OrderStatus
 from tradingbot.execution.persistence import SqliteOrderRepository
 from tradingbot.paper_trading.engine import PaperTradingEngine
@@ -131,3 +133,74 @@ def test_paper_trading_path_persists_orders_in_sqlite_order_repository(tmp_path)
     assert records[0].status == OrderStatus.FILLED
     assert records[0].execution_result is not None
     assert records[0].execution_result.success is True
+
+
+# --- RuntimeMode / Broker-Dispatch -----------------------------------------------------------
+
+
+def test_build_engine_default_mode_uses_paper_broker(tmp_path):
+
+    config = _config(tmp_path)
+    engine, _ = composition.build_engine(config)
+
+    assert isinstance(engine._orchestrator._broker, PaperBroker)
+
+
+def test_build_engine_mock_mode_without_scenario_provider_raises(tmp_path):
+
+    config = _config(tmp_path, mode=RuntimeMode.MOCK)
+
+    with pytest.raises(ValueError, match="scenario_provider"):
+        composition.build_engine(config)
+
+
+def test_build_engine_mock_mode_with_scenario_provider_uses_mock_broker(tmp_path):
+
+    config = _config(tmp_path, mode=RuntimeMode.MOCK)
+
+    def scenario_provider(order):
+        return MockExecutionScenario(MockOutcome.SUCCESS)
+
+    engine, _ = composition.build_engine(config, scenario_provider=scenario_provider)
+
+    assert isinstance(engine._orchestrator._broker, MockLiveBroker)
+
+
+def test_build_engine_mock_mode_executes_trade_via_scenario(tmp_path):
+
+    config = _config(tmp_path, session_id="session-1", candle_limit=5, mode=RuntimeMode.MOCK)
+
+    def scenario_provider(order):
+        return MockExecutionScenario(MockOutcome.SUCCESS)
+
+    engine, _ = composition.build_engine(config, scenario_provider=scenario_provider)
+    engine.start()
+
+    result = engine.run_cycle_once()
+    engine.stop()
+
+    assert result is not None
+    assert result.execution is not None
+    assert result.execution.success is True
+
+
+def test_build_engine_live_mode_raises_not_registered(tmp_path):
+
+    config = _config(tmp_path, mode=RuntimeMode.LIVE)
+
+    with pytest.raises(ValueError, match="kein Broker"):
+        composition.build_engine(config)
+
+
+def test_build_engine_paper_mode_ignores_scenario_provider(tmp_path):
+    """`scenario_provider` ist nur für MOCK relevant - PAPER darf ihn
+    ignorieren, statt einen Fehler zu werfen."""
+
+    config = _config(tmp_path)
+
+    def scenario_provider(order):
+        raise AssertionError("darf für PAPER nie aufgerufen werden")
+
+    engine, _ = composition.build_engine(config, scenario_provider=scenario_provider)
+
+    assert isinstance(engine._orchestrator._broker, PaperBroker)

@@ -8,10 +8,32 @@ Argumente. Reine Datenstruktur - keine Objekt-Konstruktion (siehe
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 from tradingbot.config.settings import DEFAULT_CAPITAL, MAX_RISK_PER_TRADE, RUNTIME_DATA_DIR
 
 _DEFAULT_DB_PATH = str(RUNTIME_DATA_DIR / "trading.sqlite3")
+
+
+class RuntimeMode(Enum):
+    """Welcher Broker für eine Runtime-Session verwendet wird.
+
+    Bewusst nur die drei Broker-Varianten, die sich denselben Objektgraphen
+    (`PaperTradingEngine`, SQLite-Repositories, `SimpleLoopScheduler`)
+    teilen - Backtest ist strukturell getrennt (eigener Einstiegspunkt,
+    kein `PaperTradingEngine`, siehe `backtest/`) und hat deshalb bewusst
+    keinen `RuntimeMode`-Wert.
+
+    `LIVE` ist architektonisch vorbereitet, aber in `cli/composition.py`
+    aktuell nicht als Broker-Factory registriert - es existiert noch kein
+    `LiveBroker`. Diesen Modus zu wählen schlägt deshalb bewusst mit einem
+    klaren Fehler fehl, statt still auf einen anderen Broker
+    zurückzufallen oder echtes Live-Trading zu ermöglichen.
+    """
+
+    PAPER = "paper"
+    MOCK = "mock"
+    LIVE = "live"
 
 
 @dataclass
@@ -32,6 +54,7 @@ class RuntimeConfig:
     max_exposure_per_asset_percent: float
     strategy_name: str
     db_path: str
+    mode: RuntimeMode = RuntimeMode.PAPER
     session_id: str | None = None
 
 
@@ -51,6 +74,7 @@ def build_config(
     max_exposure_per_asset_percent: float = 30.0,
     strategy_name: str = "simple",
     db_path: str | None = None,
+    mode: RuntimeMode = RuntimeMode.PAPER,
     session_id: str | None = None,
 ) -> RuntimeConfig:
     """Löst eine vollständige `RuntimeConfig` auf.
@@ -82,5 +106,6 @@ def build_config(
         max_exposure_per_asset_percent=max_exposure_per_asset_percent,
         strategy_name=strategy_name,
         db_path=db_path if db_path is not None else _DEFAULT_DB_PATH,
+        mode=mode,
         session_id=session_id,
     )

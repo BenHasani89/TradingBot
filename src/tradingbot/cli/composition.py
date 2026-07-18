@@ -7,13 +7,16 @@ zusammengesetzt werden. Kein anderes Modul (auch nicht `cli.commands` oder
 
 from __future__ import annotations
 
-from tradingbot.cli.config import RuntimeConfig
+from collections.abc import Callable
+
+from tradingbot.cli.config import RuntimeConfig, RuntimeMode
 from tradingbot.core.engine import TradingEngine
 from tradingbot.core.models import ExecutionCostEstimate
 from tradingbot.core.orchestrator import TradingOrchestrator
 from tradingbot.data.market import MarketDataStore
 from tradingbot.data.simulated_provider import SimulatedDataProvider
-from tradingbot.execution.broker import PaperBroker
+from tradingbot.execution.broker import Broker, PaperBroker
+from tradingbot.execution.mock_broker import MockLiveBroker, ScenarioProvider
 from tradingbot.execution.persistence import SqliteOrderRepository
 from tradingbot.paper_trading.audit import SqliteAuditLog
 from tradingbot.paper_trading.engine import PaperTradingEngine
@@ -46,8 +49,52 @@ def _build_strategy(name: str) -> Strategy:
     return strategy_class()
 
 
-def build_engine(config: RuntimeConfig) -> tuple[PaperTradingEngine, SimpleLoopScheduler]:
-    """Baut den vollständigen Objektgraphen für eine neue Paper-Trading-Session."""
+def _build_paper_broker(
+    config: RuntimeConfig, scenario_provider: ScenarioProvider | None
+) -> Broker:
+    return PaperBroker(fee_percent=config.fee_percent, slippage_percent=config.slippage_percent)
+
+
+def _build_mock_broker(config: RuntimeConfig, scenario_provider: ScenarioProvider | None) -> Broker:
+    if scenario_provider is None:
+        raise ValueError(
+            "RuntimeMode.MOCK erfordert einen scenario_provider - wird ausschliesslich "
+            "programmatisch an build_engine() übergeben, es gibt bewusst keine "
+            "CLI-/Konfigurationsoption dafür (siehe execution/mock_broker.py)."
+        )
+    return MockLiveBroker(scenario_provider=scenario_provider)
+
+
+# RuntimeMode.LIVE bewusst nicht registriert: es existiert noch kein LiveBroker.
+# Eine Auswahl von LIVE schlägt dadurch in _build_broker() mit einem klaren Fehler
+# fehl, statt still auf einen anderen Broker zurückzufallen oder echtes
+# Live-Trading zu ermöglichen.
+_BROKER_FACTORIES: dict[RuntimeMode, Callable[[RuntimeConfig, ScenarioProvider | None], Broker]] = {
+    RuntimeMode.PAPER: _build_paper_broker,
+    RuntimeMode.MOCK: _build_mock_broker,
+}
+
+
+def _build_broker(config: RuntimeConfig, scenario_provider: ScenarioProvider | None) -> Broker:
+    try:
+        factory = _BROKER_FACTORIES[config.mode]
+    except KeyError:
+        raise ValueError(
+            f"RuntimeMode {config.mode.value!r} ist architektonisch vorbereitet, aber "
+            "noch kein Broker dafür registriert (kein LiveBroker vorhanden)."
+        ) from None
+    return factory(config, scenario_provider)
+
+
+def build_engine(
+    config: RuntimeConfig, scenario_provider: ScenarioProvider | None = None
+) -> tuple[PaperTradingEngine, SimpleLoopScheduler]:
+    """Baut den vollständigen Objektgraphen für eine neue Paper-Trading-Session.
+
+    `scenario_provider` ist ausschliesslich für `RuntimeMode.MOCK` relevant
+    und wird nie aus `config` abgeleitet - reine Python-Übergabe, keine
+    CLI-Konfiguration (siehe `_build_mock_broker`).
+    """
 
     trading_engine = TradingEngine()
     portfolio = PortfolioManager(initial_capital=config.initial_capital)
@@ -56,12 +103,10 @@ def build_engine(config: RuntimeConfig) -> tuple[PaperTradingEngine, SimpleLoopS
         strategy=_build_strategy(config.strategy_name),
         risk_manager=RiskManager(max_position_size=config.max_position_size),
         portfolio=portfolio,
-        broker=PaperBroker(
-            fee_percent=config.fee_percent, slippage_percent=config.slippage_percent
-        ),
-        # Muss zum PaperBroker oben passen - TradingOrchestrator liest Fee/
-        # Slippage nicht mehr vom Broker selbst (siehe core/orchestrator.py,
-        # core/models.py::ExecutionCostEstimate).
+        broker=_build_broker(config, scenario_provider),
+        # Unabhängig vom gewählten Broker aus denselben Werten wie oben -
+        # TradingOrchestrator liest Fee/Slippage nicht mehr vom Broker selbst
+        # (siehe core/orchestrator.py, core/models.py::ExecutionCostEstimate).
         cost_estimate=ExecutionCostEstimate(
             fee_percent=config.fee_percent, slippage_percent=config.slippage_percent
         ),

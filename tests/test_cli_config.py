@@ -1,4 +1,4 @@
-from tradingbot.cli.config import RuntimeConfig, build_config
+from tradingbot.cli.config import RuntimeConfig, RuntimeMode, build_config
 from tradingbot.config.settings import DEFAULT_CAPITAL, MAX_RISK_PER_TRADE
 
 
@@ -12,6 +12,19 @@ def test_build_config_applies_sensible_defaults():
     assert config.initial_capital == DEFAULT_CAPITAL
     assert config.max_position_size == DEFAULT_CAPITAL * MAX_RISK_PER_TRADE
     assert config.session_id is None
+    assert config.mode == RuntimeMode.PAPER
+
+
+def test_runtime_mode_has_exactly_three_values_and_no_backtest():
+
+    assert {mode.value for mode in RuntimeMode} == {"paper", "mock", "live"}
+
+
+def test_build_config_respects_explicit_mode():
+
+    config = build_config(mode=RuntimeMode.MOCK)
+
+    assert config.mode == RuntimeMode.MOCK
 
 
 def test_build_config_respects_explicit_overrides(tmp_path):
