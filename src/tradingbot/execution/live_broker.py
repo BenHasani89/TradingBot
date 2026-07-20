@@ -48,6 +48,21 @@ verfügbar, die gerundete Menge unter `minQty` oder der resultierende
 Nominalwert unter `minNotional`, wird gar kein Request an `/api/v3/order`
 gestellt - `execute()` liefert stattdessen direkt ein `ExecutionResult`
 mit `status=FAILED`, wie bei einer von Binance selbst abgelehnten Order.
+
+`_server_time_offset_ms` wird nur beim Konstruktor aktiv ermittelt (siehe
+oben), kann aber bei einem lang laufenden Prozess durch Uhr-Drift veraltet
+werden - Binance lehnt einen signierten Request dann mit Fehlercode -1021
+("Timestamp for this request is outside of the recvWindow") ab, unabhängig
+davon, wie stark die Order selbst gültig wäre. `_request_signed_with_resync()`
+behandelt genau diesen Fall: bei -1021 wird `_sync_server_time()` einmalig
+erneut ausgeführt und derselbe Request (identische Parameter, bei `execute()`
+also dieselbe `newClientOrderId`) genau einmal wiederholt - kein Retry-Loop,
+kein zweiter Versuch bei einem erneuten -1021. Da -1021 bedeutet, dass
+Binance den Request bereits vor jeder Order-Verarbeitung (Zeitstempel-
+Prüfung) abgelehnt hat, hat er die Order-Engine nie erreicht - ein Retry
+kann deshalb keine zweite Order erzeugen. Jeder andere Fehlercode (z. B.
+-2010, -1111, -2013) sowie 5xx-/Netzwerkfehler werden unverändert nicht
+wiederholt.
 """
 
 from __future__ import annotations
@@ -65,6 +80,7 @@ from tradingbot.execution.broker import Broker
 from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order
 
 _ORDER_DOES_NOT_EXIST_CODE = -2013
+_TIMESTAMP_OUTSIDE_RECV_WINDOW_CODE = -1021
 
 
 class LiveBroker(Broker):
@@ -169,6 +185,33 @@ class LiveBroker(Broker):
         server_time = int(response.json()["serverTime"])
         return server_time - local_before
 
+    def _binance_error(self, response: httpx.Response) -> tuple[int | None, str]:
+        """Wertet den Binance-Fehler-Body eines 4xx strukturiert aus
+        (`code`, `msg`) statt nur den Freitext zu übernehmen - einzige
+        Stelle, die den Fehlercode parst, u. a. für die -1021-Erkennung in
+        `_request_signed_with_resync()` sowie die bestehende
+        -2013-Sonderbehandlung in `get_order_status()`."""
+
+        error = response.json()
+        return error.get("code"), error.get("msg", "Unbekannter Fehler")
+
+    def _request_signed_with_resync(self, method: str, path: str, params: dict) -> httpx.Response:
+        """Wie `_request(..., signed=True)`, mit genau einem Retry bei
+        Fehlercode -1021 (siehe Moduldocstring). 5xx-Antworten werden hier
+        bewusst nicht auf den Fehlercode geprüft (der Body ist bei einem
+        5xx nicht zwingend JSON) - deren Behandlung bleibt unverändert
+        `_raise_safe_server_error()` am Aufrufort überlassen."""
+
+        response = self._request(method, path, params, signed=True)
+
+        if 400 <= response.status_code < 500:
+            code, _ = self._binance_error(response)
+            if code == _TIMESTAMP_OUTSIDE_RECV_WINDOW_CODE:
+                self._server_time_offset_ms = self._sync_server_time()
+                response = self._request(method, path, params, signed=True)
+
+        return response
+
     def _raise_safe_server_error(self, response: httpx.Response) -> None:
         """Wandelt einen HTTP-5xx-Server-Fehler in ein `RuntimeError` ohne
         Request-Details um.
@@ -232,7 +275,7 @@ class LiveBroker(Broker):
 
         self._orders_by_client_order_id[order.client_order_id] = order
 
-        response = self._request(
+        response = self._request_signed_with_resync(
             "POST",
             "/api/v3/order",
             {
@@ -243,20 +286,16 @@ class LiveBroker(Broker):
                 "newClientOrderId": order.client_order_id,
                 "newOrderRespType": "FULL",
             },
-            signed=True,
         )
 
         if response.status_code >= 500:
             self._raise_safe_server_error(response)
         if response.status_code >= 400:
-            error = response.json()
+            code, msg = self._binance_error(response)
             return ExecutionResult(
                 success=False,
                 order=order,
-                message=(
-                    f"Binance: {error.get('msg', 'Order abgelehnt')} "
-                    f"(code {error.get('code')})"
-                ),
+                message=f"Binance: {msg} (code {code})",
                 fee=0.0,
                 slippage=0.0,
                 status=ExecutionStatus.FAILED,
@@ -278,22 +317,19 @@ class LiveBroker(Broker):
         if original_order is None:
             return None
 
-        response = self._request(
+        response = self._request_signed_with_resync(
             "GET",
             "/api/v3/order",
             {"symbol": original_order.symbol, "origClientOrderId": client_order_id},
-            signed=True,
         )
 
         if response.status_code >= 500:
             self._raise_safe_server_error(response)
         if response.status_code >= 400:
-            error = response.json()
-            if error.get("code") == _ORDER_DOES_NOT_EXIST_CODE:
+            code, msg = self._binance_error(response)
+            if code == _ORDER_DOES_NOT_EXIST_CODE:
                 return None
-            raise RuntimeError(
-                f"Binance: {error.get('msg', 'Unbekannter Fehler')} (code {error.get('code')})"
-            )
+            raise RuntimeError(f"Binance: {msg} (code {code})")
 
         return self._execution_result_from_order_response(
             original_order, response.json(), include_fills=False

@@ -406,6 +406,184 @@ def test_execute_order_still_new_returns_unknown_status():
     assert result.success is False
 
 
+# --- execute(): Lazy Server-Time Re-Sync bei -1021 --------------------------------------------
+
+
+def test_execute_resyncs_time_once_and_retries_once_after_timestamp_error():
+    """Erste Order-Antwort: -1021 (Timestamp ausserhalb recvWindow) ->
+    genau ein erneuter /api/v3/time-Aufruf, genau ein Retry von
+    /api/v3/order -> danach Erfolg."""
+
+    time_calls: list[int] = []
+    order_calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            time_calls.append(1)
+            return httpx.Response(200, json={"serverTime": 1_700_000_000_000})
+        if request.url.path == "/api/v3/order":
+            order_calls.append(1)
+            if len(order_calls) == 1:
+                return httpx.Response(
+                    400, json={"code": -1021, "msg": "Timestamp outside recvWindow"}
+                )
+            return _filled_order_response()
+        raise AssertionError(f"Unerwarteter Aufruf: {request.url.path}")
+
+    broker = _broker(handler)
+
+    result = broker.execute(_order())
+
+    # Ein /api/v3/time-Aufruf beim Konstruktor + genau ein weiterer beim Re-Sync.
+    assert len(time_calls) == 2
+    assert len(order_calls) == 2
+    assert result.success is True
+    assert result.status == ExecutionStatus.SUCCESS
+
+
+def test_execute_second_timestamp_error_after_retry_returns_failed_result():
+    """Zweite Antwort ist erneut -1021 -> kein dritter Versuch, normales
+    FAILED-Ergebnis statt einer Exception oder einer Endlosschleife."""
+
+    order_calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            return httpx.Response(200, json={"serverTime": 1_700_000_000_000})
+        if request.url.path == "/api/v3/order":
+            order_calls.append(1)
+            return httpx.Response(
+                400, json={"code": -1021, "msg": "Timestamp outside recvWindow"}
+            )
+        raise AssertionError(f"Unerwarteter Aufruf: {request.url.path}")
+
+    broker = _broker(handler)
+
+    result = broker.execute(_order())
+
+    assert len(order_calls) == 2
+    assert result.success is False
+    assert result.status == ExecutionStatus.FAILED
+    assert "Timestamp outside recvWindow" in result.message
+
+
+def test_execute_non_timestamp_error_is_not_retried():
+    """-1111 (ungültige Precision) ist kein Timestamp-Fehler -> kein
+    Re-Sync, kein Retry, ein einziger /api/v3/order-Aufruf."""
+
+    time_calls: list[int] = []
+    order_calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            time_calls.append(1)
+            return httpx.Response(200, json={"serverTime": 1_700_000_000_000})
+        if request.url.path == "/api/v3/order":
+            order_calls.append(1)
+            return httpx.Response(
+                400, json={"code": -1111, "msg": "Parameter 'quantity' has too much precision."}
+            )
+        raise AssertionError(f"Unerwarteter Aufruf: {request.url.path}")
+
+    broker = _broker(handler)
+
+    result = broker.execute(_order())
+
+    assert len(time_calls) == 1
+    assert len(order_calls) == 1
+    assert result.success is False
+    assert result.status == ExecutionStatus.FAILED
+    assert "too much precision" in result.message
+
+
+# --- get_order_status(): Lazy Server-Time Re-Sync bei -1021 -----------------------------------
+
+
+def test_get_order_status_resyncs_time_once_and_retries_once_after_timestamp_error():
+
+    time_calls: list[int] = []
+    get_calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            time_calls.append(1)
+            return httpx.Response(200, json={"serverTime": 1_700_000_000_000})
+        if request.url.path == "/api/v3/order" and request.method == "POST":
+            return _filled_order_response()
+        if request.url.path == "/api/v3/order" and request.method == "GET":
+            get_calls.append(1)
+            if len(get_calls) == 1:
+                return httpx.Response(
+                    400, json={"code": -1021, "msg": "Timestamp outside recvWindow"}
+                )
+            return _filled_order_response()
+        raise AssertionError(f"Unerwarteter Aufruf: {request.url.path}")
+
+    broker = _broker(handler)
+    broker.execute(_order("order-1"))
+
+    result = broker.get_order_status("order-1")
+
+    # Ein /api/v3/time-Aufruf beim Konstruktor + genau ein weiterer beim Re-Sync.
+    assert len(time_calls) == 2
+    assert len(get_calls) == 2
+    assert result is not None
+    assert result.success is True
+
+
+def test_get_order_status_second_timestamp_error_after_retry_raises_runtime_error():
+
+    get_calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            return httpx.Response(200, json={"serverTime": 1_700_000_000_000})
+        if request.url.path == "/api/v3/order" and request.method == "POST":
+            return _filled_order_response()
+        if request.url.path == "/api/v3/order" and request.method == "GET":
+            get_calls.append(1)
+            return httpx.Response(
+                400, json={"code": -1021, "msg": "Timestamp outside recvWindow"}
+            )
+        raise AssertionError(f"Unerwarteter Aufruf: {request.url.path}")
+
+    broker = _broker(handler)
+    broker.execute(_order("order-1"))
+
+    with pytest.raises(RuntimeError, match="Timestamp outside recvWindow"):
+        broker.get_order_status("order-1")
+
+    assert len(get_calls) == 2
+
+
+def test_get_order_status_non_timestamp_error_is_not_retried():
+    """-2013 (Order existiert nicht) bleibt unverändert per Sonderfall
+    behandelt - kein Re-Sync, kein Retry, ein einziger GET-Aufruf."""
+
+    time_calls: list[int] = []
+    get_calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            time_calls.append(1)
+            return httpx.Response(200, json={"serverTime": 1_700_000_000_000})
+        if request.url.path == "/api/v3/order" and request.method == "POST":
+            return _filled_order_response()
+        if request.url.path == "/api/v3/order" and request.method == "GET":
+            get_calls.append(1)
+            return httpx.Response(400, json={"code": -2013, "msg": "Order does not exist"})
+        raise AssertionError(f"Unerwarteter Aufruf: {request.url.path}")
+
+    broker = _broker(handler)
+    broker.execute(_order("order-1"))
+
+    result = broker.get_order_status("order-1")
+
+    assert len(time_calls) == 1
+    assert len(get_calls) == 1
+    assert result is None
+
+
 # --- execute(): LOT_SIZE/minNotional-Rundung -------------------------------------------------
 
 
