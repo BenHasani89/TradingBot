@@ -321,6 +321,24 @@ def test_build_engine_live_mode_executes_trade_via_mocked_binance(tmp_path, monk
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v3/time":
             return httpx.Response(200, json={"serverTime": 1700000000000})
+        if request.url.path == "/api/v3/exchangeInfo":
+            return httpx.Response(
+                200,
+                json={
+                    "symbols": [
+                        {
+                            "filters": [
+                                {
+                                    "filterType": "LOT_SIZE",
+                                    "stepSize": "0.00001000",
+                                    "minQty": "0.00001000",
+                                },
+                                {"filterType": "NOTIONAL", "minNotional": "5.00000000"},
+                            ]
+                        }
+                    ]
+                },
+            )
         if request.url.path == "/api/v3/klines":
             # 5 Kerzen mit steigendem Schlusskurs - SimpleStrategy liefert BUY.
             base_time = 1_700_000_000_000

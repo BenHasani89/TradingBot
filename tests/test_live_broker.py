@@ -1,8 +1,10 @@
 from collections.abc import Callable
+from decimal import Decimal
 
 import httpx
 import pytest
 
+from tradingbot.execution.binance_symbol_filters import BinanceSymbolFilters
 from tradingbot.execution.broker import Broker
 from tradingbot.execution.live_broker import LiveBroker
 from tradingbot.execution.models import ExecutionStatus, Order
@@ -72,15 +74,56 @@ def _filled_order_response(
     )
 
 
+def _default_exchange_info_handler(request: httpx.Request) -> httpx.Response:
+    """Realistische `exchangeInfo`-Antwort für BTCUSDT - stepSize/minQty
+    passend zur echten Binance-Testnet-Konfiguration (siehe
+    binance_symbol_filters-Tests für die davon unabhängigen Unit-Tests
+    der Rundungslogik selbst)."""
+
+    return httpx.Response(
+        200,
+        json={
+            "symbols": [
+                {
+                    "filters": [
+                        {
+                            "filterType": "LOT_SIZE",
+                            "stepSize": "0.00001000",
+                            "minQty": "0.00001000",
+                        },
+                        {"filterType": "NOTIONAL", "minNotional": "5.00000000"},
+                    ]
+                }
+            ]
+        },
+    )
+
+
 def _broker(
     handler: Callable[[httpx.Request], httpx.Response],
     min_request_interval_seconds: float = 0.0,
     clock: _FakeClock | None = None,
     now_ms: Callable[[], int] | None = None,
+    exchange_info_handler: Callable[[httpx.Request], httpx.Response] | None = None,
 ) -> LiveBroker:
+    """`exchangeInfo`-Aufrufe (für `BinanceSymbolFilters`) werden bereits
+    hier abgefangen und beantwortet, bevor sie an `handler` gehen - so
+    müssen bestehende, auf `execute()`/`get_order_status()` fokussierte
+    Test-Handler `/api/v3/exchangeInfo` nicht selbst kennen."""
 
     clock = clock or _FakeClock()
-    client = httpx.Client(transport=httpx.MockTransport(handler), base_url=_BASE_URL)
+    info_handler = exchange_info_handler or _default_exchange_info_handler
+
+    def combined_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/exchangeInfo":
+            return info_handler(request)
+        return handler(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(combined_handler), base_url=_BASE_URL)
+    symbol_filters = BinanceSymbolFilters(
+        base_url=_BASE_URL,
+        client=httpx.Client(transport=httpx.MockTransport(combined_handler), base_url=_BASE_URL),
+    )
     kwargs: dict = {
         "api_key": "test-key",
         "api_secret": "test-secret",  # noqa: S106 - Platzhalterwert im Test, kein echtes Secret
@@ -89,6 +132,7 @@ def _broker(
         "sleep": clock.sleep,
         "monotonic": clock.now,
         "client": client,
+        "symbol_filters": symbol_filters,
     }
     if now_ms is not None:
         kwargs["now_ms"] = now_ms
@@ -118,6 +162,7 @@ def test_close_closes_underlying_http_client():
     broker.close()
 
     assert broker._client.is_closed
+    assert broker._symbol_filters._client.is_closed
 
 
 # --- Server-Zeit-Synchronisation --------------------------------------------------------------
@@ -259,6 +304,137 @@ def test_execute_order_still_new_returns_unknown_status():
 
     assert result.status == ExecutionStatus.UNKNOWN
     assert result.success is False
+
+
+# --- execute(): LOT_SIZE/minNotional-Rundung -------------------------------------------------
+
+
+def test_execute_rounds_quantity_to_valid_lot_size_precision_before_sending():
+    """Der exakte, real aufgetretene Fehlerfall: eine aus
+    position_size/current_price berechnete Menge mit voller
+    Fliesskomma-Präzision muss vor dem Senden auf ein gültiges
+    LOT_SIZE-Vielfaches abgerundet werden (0.00023364667949127328 ->
+    0.00023 bei stepSize=0.00001), sonst lehnt Binance mit
+    -1111 'Parameter quantity has too much precision.' ab."""
+
+    captured_quantity: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            return httpx.Response(200, json={"serverTime": 1_700_000_000_000})
+        if request.url.path == "/api/v3/order":
+            captured_quantity.append(request.url.params["quantity"])
+            return _filled_order_response(executed_qty="0.00023", cumulative_quote_qty="14.7315")
+        raise AssertionError(f"Unerwarteter Aufruf: {request.url.path}")
+
+    broker = _broker(handler)
+    order = Order(
+        symbol="BTCUSDT",
+        side="SELL",
+        quantity=0.00023364667949127328,
+        price=64050.0,
+        client_order_id="order-1",
+    )
+
+    result = broker.execute(order)
+
+    assert Decimal(captured_quantity[0]) == Decimal("0.00023")
+    assert result.success is True
+
+
+def test_execute_exchange_info_unavailable_does_not_send_order():
+    """Ist exchangeInfo nicht verfügbar, darf gar kein Request an
+    /api/v3/order gestellt werden - sauberes FAILED-ExecutionResult statt
+    eines unkontrollierten Sendeversuchs mit ungerundeter Menge."""
+
+    def order_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            return httpx.Response(200, json={"serverTime": 1_700_000_000_000})
+        raise AssertionError("Darf nie aufgerufen werden, wenn exchangeInfo fehlschlägt")
+
+    def failing_exchange_info_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"code": -1000, "msg": "Internal error"})
+
+    broker = _broker(order_handler, exchange_info_handler=failing_exchange_info_handler)
+
+    result = broker.execute(_order())
+
+    assert result.success is False
+    assert result.status == ExecutionStatus.FAILED
+    assert result.filled_quantity == 0.0
+    assert "exchangeInfo" in result.message
+
+
+def test_execute_quantity_below_min_qty_after_rounding_does_not_send_order():
+
+    def order_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            return httpx.Response(200, json={"serverTime": 1_700_000_000_000})
+        raise AssertionError("Darf nie aufgerufen werden, wenn quantity unter minQty liegt")
+
+    def small_min_qty_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "symbols": [
+                    {
+                        "filters": [
+                            {
+                                "filterType": "LOT_SIZE",
+                                "stepSize": "0.00001000",
+                                "minQty": "1.00000000",
+                            },
+                            {"filterType": "NOTIONAL", "minNotional": "5.00000000"},
+                        ]
+                    }
+                ]
+            },
+        )
+
+    broker = _broker(order_handler, exchange_info_handler=small_min_qty_handler)
+
+    result = broker.execute(_order())
+
+    assert result.success is False
+    assert result.status == ExecutionStatus.FAILED
+    assert "minQty" in result.message
+
+
+def test_execute_notional_below_min_notional_does_not_send_order():
+
+    def order_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            return httpx.Response(200, json={"serverTime": 1_700_000_000_000})
+        raise AssertionError(
+            "Darf nie aufgerufen werden, wenn der Nominalwert unter minNotional liegt"
+        )
+
+    def high_min_notional_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "symbols": [
+                    {
+                        "filters": [
+                            {
+                                "filterType": "LOT_SIZE",
+                                "stepSize": "0.00001000",
+                                "minQty": "0.00001000",
+                            },
+                            {"filterType": "NOTIONAL", "minNotional": "1000000.00000000"},
+                        ]
+                    }
+                ]
+            },
+        )
+
+    broker = _broker(order_handler, exchange_info_handler=high_min_notional_handler)
+
+    result = broker.execute(_order())
+
+    assert result.success is False
+    assert result.status == ExecutionStatus.FAILED
+    assert "minNotional" in result.message
 
 
 # --- get_order_status() --------------------------------------------------------------------

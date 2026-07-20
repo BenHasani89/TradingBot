@@ -37,6 +37,17 @@ Bekannte Einschränkung: Binances Order-Status-Endpunkt (`GET /api/v3/order`)
 liefert keine Gebühren-Aufschlüsselung (kein `fills`-Array wie bei der
 Order-Platzierung) - `get_order_status()` liefert deshalb immer `fee=0.0`.
 Nur das `execute()`-Ergebnis selbst kennt die tatsächliche Gebühr.
+
+`execute()` rundet die angefragte Menge vor dem Senden über
+`BinanceSymbolFilters` auf ein gültiges `LOT_SIZE`-Vielfaches ab (reine
+`Decimal`-Arithmetik, siehe `execution/binance_symbol_filters.py`) - eine
+aus `position_size / current_price` berechnete Menge hat sonst volle
+Fliesskomma-Präzision und wird von Binance mit `-1111 "Parameter
+'quantity' has too much precision."` abgelehnt. Ist `exchangeInfo` nicht
+verfügbar, die gerundete Menge unter `minQty` oder der resultierende
+Nominalwert unter `minNotional`, wird gar kein Request an `/api/v3/order`
+gestellt - `execute()` liefert stattdessen direkt ein `ExecutionResult`
+mit `status=FAILED`, wie bei einer von Binance selbst abgelehnten Order.
 """
 
 from __future__ import annotations
@@ -49,6 +60,7 @@ from urllib.parse import urlencode
 
 import httpx
 
+from tradingbot.execution.binance_symbol_filters import BinanceSymbolFilters
 from tradingbot.execution.broker import Broker
 from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order
 
@@ -76,6 +88,7 @@ class LiveBroker(Broker):
         monotonic: Callable[[], float] = time.monotonic,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
         client: httpx.Client | None = None,
+        symbol_filters: BinanceSymbolFilters | None = None,
     ) -> None:
         self._api_key = api_key
         self._api_secret = api_secret
@@ -92,6 +105,14 @@ class LiveBroker(Broker):
             if client is not None
             else httpx.Client(base_url=base_url, headers={"X-MBX-APIKEY": api_key})
         )
+        # Nur im LIVE-Build relevant (siehe Moduldocstring) - Default
+        # konstruiert dieselbe base_url wie oben, ausschliesslich für
+        # Tests explizit injizierbar (analog zum `client`-Parameter).
+        self._symbol_filters = (
+            symbol_filters
+            if symbol_filters is not None
+            else BinanceSymbolFilters(base_url=base_url)
+        )
         # Einmaliger Zeit-Abgleich, ausschliesslich beim Konstruktor (siehe
         # Klassendocstring) - kein laufender Re-Sync. Schlägt der Abgleich
         # fehl, propagiert die Exception unverändert (fail fast: ohne
@@ -104,6 +125,7 @@ class LiveBroker(Broker):
         `Broker`-ABC."""
 
         self._client.close()
+        self._symbol_filters.close()
 
     def _throttle(self) -> None:
         """Wartet, falls nötig, bis seit dem letzten Aufruf mindestens
@@ -171,12 +193,42 @@ class LiveBroker(Broker):
     def execute(self, order: Order) -> ExecutionResult:
         """Platziert eine Market-Order.
 
+        Rundet `order.quantity` zuerst über `BinanceSymbolFilters` auf ein
+        gültiges `LOT_SIZE`-Vielfaches ab (siehe Moduldocstring). Ist das
+        nicht möglich (`exchangeInfo` nicht verfügbar, gerundete Menge
+        unter `minQty`, Nominalwert unter `minNotional`), wird gar kein
+        Request an `/api/v3/order` gestellt - `ExecutionResult` mit
+        `status=FAILED` wie bei einer von Binance selbst abgelehnten
+        Order, kein Ausnahmefall.
+
         Eine von Binance definitiv abgelehnte Order (HTTP 4xx mit
-        Fehler-Payload, z. B. unzureichendes Guthaben) liefert ein
-        `ExecutionResult` mit `status=FAILED` - kein Ausnahmefall. Ein
+        Fehler-Payload, z. B. unzureichendes Guthaben) liefert ebenfalls
+        ein `ExecutionResult` mit `status=FAILED` - kein Ausnahmefall. Ein
         Server-/Netzwerkfehler (5xx, Verbindungsabbruch) propagiert
         dagegen als Exception (Ausgang unklar, siehe `OrderManager`).
         """
+
+        rounded_quantity, reject_reason = self._symbol_filters.round_quantity(
+            order.symbol, order.quantity, order.price
+        )
+        if rounded_quantity is None:
+            return ExecutionResult(
+                success=False,
+                order=order,
+                message=f"Binance: {reject_reason} - Order nicht gesendet.",
+                fee=0.0,
+                slippage=0.0,
+                status=ExecutionStatus.FAILED,
+                filled_quantity=0.0,
+            )
+
+        order = Order(
+            symbol=order.symbol,
+            side=order.side,
+            quantity=float(rounded_quantity),
+            price=order.price,
+            client_order_id=order.client_order_id,
+        )
 
         self._orders_by_client_order_id[order.client_order_id] = order
 
@@ -187,7 +239,7 @@ class LiveBroker(Broker):
                 "symbol": order.symbol,
                 "side": order.side,
                 "type": "MARKET",
-                "quantity": order.quantity,
+                "quantity": str(rounded_quantity),
                 "newClientOrderId": order.client_order_id,
                 "newOrderRespType": "FULL",
             },
