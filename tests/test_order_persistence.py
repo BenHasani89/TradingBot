@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import UTC, datetime
 
 from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order, OrderStatus
@@ -5,6 +6,26 @@ from tradingbot.execution.order_repository import OrderRecord, OrderRepository
 from tradingbot.execution.persistence import SqliteOrderRepository
 
 _NOW = datetime(2026, 7, 18, 12, tzinfo=UTC)
+
+_OLD_ORDER_RECORD_SCHEMA = """
+CREATE TABLE order_record (
+    client_order_id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    price REAL NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    execution_success INTEGER,
+    execution_message TEXT,
+    execution_fee REAL,
+    execution_slippage REAL,
+    execution_status TEXT,
+    execution_broker_order_id TEXT,
+    execution_filled_quantity REAL
+)
+"""
 
 
 def _repository(tmp_path) -> SqliteOrderRepository:
@@ -312,3 +333,93 @@ def test_records_unknown_status_execution_result(tmp_path):
     assert loaded.status == OrderStatus.UNKNOWN
     assert loaded.execution_result.status == ExecutionStatus.UNKNOWN
     assert loaded.execution_result.broker_order_id is None
+
+
+# --- Schema-Migration (order_record) --------------------------------------------------------
+
+
+def test_save_and_get_work_after_migrating_a_pre_existing_old_schema_database(tmp_path):
+    """Simuliert exakt den real aufgetretenen Fall: eine bereits
+    existierende Datei mit dem ursprünglichen order_record-Schema (ohne
+    execution_price/execution_fee_asset) muss nach Konstruktion von
+    SqliteOrderRepository wieder normal nutzbar sein - inklusive
+    vorher bereits vorhandener Zeilen."""
+
+    db_path = str(tmp_path / "legacy.sqlite3")
+
+    connection = sqlite3.connect(db_path)
+    connection.execute(_OLD_ORDER_RECORD_SCHEMA)
+    connection.execute(
+        "INSERT INTO order_record ("
+        "client_order_id, symbol, side, quantity, price, status, created_at, updated_at, "
+        "execution_success, execution_message, execution_fee, execution_slippage, "
+        "execution_status, execution_broker_order_id, execution_filled_quantity"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "legacy-order-1",
+            "BTCUSDT",
+            "BUY",
+            0.1,
+            60000.0,
+            OrderStatus.FILLED.value,
+            _NOW.isoformat(),
+            _NOW.isoformat(),
+            1,
+            "Binance: Order-Status FILLED",
+            0.0,
+            0.0,
+            ExecutionStatus.SUCCESS.value,
+            "42",
+            0.1,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    # Konstruktion gegen die bereits existierende, alte Datei - muss die
+    # Migration transparent anwenden, nicht mit OperationalError scheitern.
+    repository = SqliteOrderRepository(db_path)
+
+    legacy_record = repository.get("legacy-order-1")
+    assert legacy_record is not None
+    assert legacy_record.status == OrderStatus.FILLED
+    assert legacy_record.execution_result.filled_quantity == 0.1
+    # Alte Zeile hatte kein execution_price/execution_fee_asset - fällt
+    # sauber auf den Intent-Preis bzw. None zurück (siehe persistence.py).
+    assert legacy_record.execution_result.order.price == 60000.0
+    assert legacy_record.execution_result.fee_asset is None
+
+    new_order = _order("new-order-1")
+    execution_result = ExecutionResult(
+        success=True,
+        order=Order(
+            symbol=new_order.symbol,
+            side=new_order.side,
+            quantity=new_order.quantity,
+            price=60050.0,
+            client_order_id=new_order.client_order_id,
+        ),
+        message="Binance: Order-Status FILLED",
+        fee=0.000001,
+        slippage=0.0,
+        status=ExecutionStatus.SUCCESS,
+        broker_order_id="new-order-1",
+        filled_quantity=0.1,
+        fee_asset="BTC",
+    )
+    repository.save(
+        OrderRecord(
+            client_order_id="new-order-1",
+            order=new_order,
+            status=OrderStatus.FILLED,
+            created_at=_NOW,
+            updated_at=_NOW,
+            execution_result=execution_result,
+        )
+    )
+
+    new_record = repository.get("new-order-1")
+    assert new_record.execution_result.order.price == 60050.0
+    assert new_record.execution_result.fee_asset == "BTC"
+
+    assert {r.client_order_id for r in repository.all()} == {"legacy-order-1", "new-order-1"}

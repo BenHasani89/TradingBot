@@ -1,10 +1,19 @@
 """SQLite-Implementierung des `OrderRepository`.
 
-Verwendet ausschliesslich die Standardbibliothek `sqlite3` - kein ORM, keine
-Migrationen, keine externe Abhängigkeit. Für dauerhafte Order-Nachverfolgung
+Verwendet ausschliesslich die Standardbibliothek `sqlite3` - kein ORM,
+keine externe Abhängigkeit. Für dauerhafte Order-Nachverfolgung
 (Paper/Live Trading) - der `TradingOrchestrator` selbst verwendet intern
 `InMemoryOrderRepository` (siehe `execution/order_repository.py`), damit
 Backtest-Läufe keine SQLite-Schreibvorgänge auslösen.
+
+`order_record` ist aktuell die einzige Tabelle im Projekt mit
+tatsächlichem Migrationsbedarf (zwei nachträglich ergänzte Spalten,
+`execution_price` und `execution_fee_asset`) - siehe
+`schema_migration.py` für den minimalen, wiederverwendbaren
+Migrationsbaustein. `_ORDER_RECORD_LATEST_VERSION`/`_ORDER_RECORD_MIGRATIONS`
+dokumentieren die Versionsgeschichte: Version 1 = ursprüngliches Schema
+(bis einschliesslich `execution_filled_quantity`), Version 2 = `execution_price`
+ergänzt, Version 3 = `execution_fee_asset` ergänzt.
 """
 
 from __future__ import annotations
@@ -14,6 +23,7 @@ from datetime import datetime
 
 from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order, OrderStatus
 from tradingbot.execution.order_repository import OrderRecord, OrderRepository
+from tradingbot.schema_migration import apply_column_migrations
 
 _CREATE_ORDER_RECORD_TABLE = """
 CREATE TABLE IF NOT EXISTS order_record (
@@ -36,6 +46,12 @@ CREATE TABLE IF NOT EXISTS order_record (
     execution_fee_asset TEXT
 )
 """
+
+_ORDER_RECORD_LATEST_VERSION = 3
+_ORDER_RECORD_MIGRATIONS: dict[int, list[tuple[str, str]]] = {
+    2: [("execution_price", "execution_price REAL")],
+    3: [("execution_fee_asset", "execution_fee_asset TEXT")],
+}
 
 _SELECT_COLUMNS = (
     "client_order_id, symbol, side, quantity, price, status, created_at, updated_at, "
@@ -127,6 +143,12 @@ class SqliteOrderRepository(OrderRepository):
         try:
             with connection:
                 connection.execute(_CREATE_ORDER_RECORD_TABLE)
+            apply_column_migrations(
+                connection,
+                table_name="order_record",
+                latest_version=_ORDER_RECORD_LATEST_VERSION,
+                migrations=_ORDER_RECORD_MIGRATIONS,
+            )
         finally:
             connection.close()
 
