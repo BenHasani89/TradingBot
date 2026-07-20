@@ -167,6 +167,66 @@ def test_save_and_get_roundtrip_without_execution_price_falls_back_to_intent_pri
     assert loaded.execution_result.order.price == 60000.0
 
 
+def test_save_and_get_roundtrip_persists_fee_asset(tmp_path):
+
+    repository = _repository(tmp_path)
+    order = _order()
+    execution_result = ExecutionResult(
+        success=True,
+        order=order,
+        message="Binance: Order-Status FILLED",
+        fee=0.000001,
+        slippage=0.0,
+        status=ExecutionStatus.SUCCESS,
+        broker_order_id="order-1",
+        filled_quantity=0.1,
+        fee_asset="BTC",
+    )
+    record = OrderRecord(
+        client_order_id="order-1",
+        order=order,
+        status=OrderStatus.FILLED,
+        created_at=_NOW,
+        updated_at=_NOW,
+        execution_result=execution_result,
+    )
+
+    repository.save(record)
+    loaded = repository.get("order-1")
+
+    assert loaded.execution_result.fee_asset == "BTC"
+
+
+def test_save_and_get_roundtrip_without_fee_asset_stays_none(tmp_path):
+    """Legacy-Fall (PaperBroker/MockLiveBroker, oder mehrere Fills mit
+    unterschiedlichen commissionAsset-Werten) - fee_asset bleibt None."""
+
+    repository = _repository(tmp_path)
+    order = _order()
+    execution_result = ExecutionResult(
+        success=True,
+        order=order,
+        message="Paper Order ausgeführt",
+        fee=0.0,
+        slippage=0.0,
+        status=ExecutionStatus.SUCCESS,
+        broker_order_id="order-1",
+    )
+    record = OrderRecord(
+        client_order_id="order-1",
+        order=order,
+        status=OrderStatus.FILLED,
+        created_at=_NOW,
+        updated_at=_NOW,
+        execution_result=execution_result,
+    )
+
+    repository.save(record)
+    loaded = repository.get("order-1")
+
+    assert loaded.execution_result.fee_asset is None
+
+
 def test_save_overwrites_previous_record_for_same_client_order_id(tmp_path):
 
     repository = _repository(tmp_path)

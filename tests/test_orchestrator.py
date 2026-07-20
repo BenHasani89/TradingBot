@@ -257,6 +257,103 @@ def test_run_cycle_books_only_actually_filled_quantity_on_partial_fill():
     assert status.capital == pytest.approx(10000.0 - expected_filled * 110.0)
 
 
+class _FeeAssetBroker(Broker):
+    """Meldet eine Gebühr mit explizitem `fee_asset` - für Tests, die
+    TradingOrchestrators Schutz gegen das Vermischen unterschiedlicher
+    Währungen im Cash-Impact prüfen (siehe execution/live_broker.py für
+    den echten Anwendungsfall: Binance-Gebühren im Base-Asset)."""
+
+    def __init__(self, fee: float, fee_asset: str | None) -> None:
+        self._fee = fee
+        self._fee_asset = fee_asset
+
+    def execute(self, order: Order) -> ExecutionResult:
+        return ExecutionResult(
+            success=True,
+            order=order,
+            message="Gefüllt",
+            fee=self._fee,
+            slippage=0.0,
+            status=ExecutionStatus.SUCCESS,
+            broker_order_id=order.client_order_id,
+            fee_asset=self._fee_asset,
+        )
+
+    def get_order_status(self, client_order_id: str) -> ExecutionResult | None:
+        return None
+
+
+def test_run_cycle_excludes_fee_from_cash_impact_when_fee_asset_is_known():
+    """Ein bekanntes fee_asset (z. B. 'BTC' bei einer BTCUSDT-BUY-Order,
+    Base-Asset-Gebühr) darf nicht blind zum Cash-Impact addiert werden -
+    unbekannt, ob es dem Quote-Asset entspricht (siehe core/orchestrator.py)."""
+
+    engine = TradingEngine()
+    portfolio = PortfolioManager(initial_capital=10000.0)
+    orchestrator = TradingOrchestrator(
+        engine=engine,
+        strategy=SimpleStrategy(),
+        risk_manager=RiskManager(max_position_size=1000.0),
+        portfolio=portfolio,
+        broker=_FeeAssetBroker(fee=0.5, fee_asset="BTC"),
+    )
+    engine.start()
+
+    result = orchestrator.run_cycle(_candles(100, 110))
+
+    requested_quantity = 1000.0 / 110
+    assert result.execution.fee == pytest.approx(0.5)
+    assert result.execution.fee_asset == "BTC"
+    status = portfolio.status()
+    # Gebühr fliesst NICHT ins gebuchte Kapital ein (unbekannte Einheit):
+    assert status.capital == pytest.approx(10000.0 - requested_quantity * 110.0)
+
+
+def test_run_cycle_includes_fee_in_cash_impact_when_fee_asset_is_none():
+    """Legacy-Fall (PaperBroker/MockLiveBroker, fee_asset immer None) -
+    unverändertes bisheriges Verhalten: Gebühr fliesst in den Cash-Impact
+    ein."""
+
+    engine = TradingEngine()
+    portfolio = PortfolioManager(initial_capital=10000.0)
+    orchestrator = TradingOrchestrator(
+        engine=engine,
+        strategy=SimpleStrategy(),
+        risk_manager=RiskManager(max_position_size=1000.0),
+        portfolio=portfolio,
+        broker=_FeeAssetBroker(fee=0.5, fee_asset=None),
+    )
+    engine.start()
+
+    orchestrator.run_cycle(_candles(100, 110))
+
+    requested_quantity = 1000.0 / 110
+    status = portfolio.status()
+    assert status.capital == pytest.approx(10000.0 - (requested_quantity * 110.0 + 0.5))
+
+
+def test_run_cycle_includes_zero_fee_regardless_of_fee_asset():
+    """Eine Gebühr von exakt 0 ist einheitenunabhängig sicher zu addieren,
+    selbst mit bekanntem fee_asset."""
+
+    engine = TradingEngine()
+    portfolio = PortfolioManager(initial_capital=10000.0)
+    orchestrator = TradingOrchestrator(
+        engine=engine,
+        strategy=SimpleStrategy(),
+        risk_manager=RiskManager(max_position_size=1000.0),
+        portfolio=portfolio,
+        broker=_FeeAssetBroker(fee=0.0, fee_asset="BTC"),
+    )
+    engine.start()
+
+    orchestrator.run_cycle(_candles(100, 110))
+
+    requested_quantity = 1000.0 / 110
+    status = portfolio.status()
+    assert status.capital == pytest.approx(10000.0 - requested_quantity * 110.0)
+
+
 class _ContradictoryZeroFillBroker(Broker):
     """Verletzt bewusst den Vertrag `filled_quantity==0 => success=False`
     (z. B. eine denkbare Fehlkonfiguration eines künftigen Brokers) - dient

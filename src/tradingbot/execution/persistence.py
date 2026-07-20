@@ -32,14 +32,16 @@ CREATE TABLE IF NOT EXISTS order_record (
     execution_status TEXT,
     execution_broker_order_id TEXT,
     execution_filled_quantity REAL,
-    execution_price REAL
+    execution_price REAL,
+    execution_fee_asset TEXT
 )
 """
 
 _SELECT_COLUMNS = (
     "client_order_id, symbol, side, quantity, price, status, created_at, updated_at, "
     "execution_success, execution_message, execution_fee, execution_slippage, "
-    "execution_status, execution_broker_order_id, execution_filled_quantity, execution_price"
+    "execution_status, execution_broker_order_id, execution_filled_quantity, execution_price, "
+    "execution_fee_asset"
 )
 
 
@@ -69,6 +71,7 @@ def _row_to_record(row: tuple) -> OrderRecord:
         execution_broker_order_id,
         execution_filled_quantity,
         execution_price,
+        execution_fee_asset,
     ) = row
 
     order = Order(
@@ -97,6 +100,7 @@ def _row_to_record(row: tuple) -> OrderRecord:
             status=ExecutionStatus(execution_status),
             broker_order_id=execution_broker_order_id,
             filled_quantity=execution_filled_quantity,
+            fee_asset=execution_fee_asset,
         )
 
     return OrderRecord(
@@ -148,8 +152,8 @@ class SqliteOrderRepository(OrderRepository):
                     "created_at, updated_at, "
                     "execution_success, execution_message, execution_fee, "
                     "execution_slippage, execution_status, execution_broker_order_id, "
-                    "execution_filled_quantity, execution_price"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "execution_filled_quantity, execution_price, execution_fee_asset"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         order_record.client_order_id,
                         order_record.order.symbol,
@@ -167,6 +171,7 @@ class SqliteOrderRepository(OrderRepository):
                         execution_result.broker_order_id if execution_result else None,
                         execution_result.filled_quantity if execution_result else None,
                         execution_result.order.price if execution_result else None,
+                        execution_result.fee_asset if execution_result else None,
                     ),
                 )
         finally:

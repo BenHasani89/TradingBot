@@ -110,6 +110,18 @@ class ExecutionResult:
     `order.quantity` bedeutet eine echte Teilausführung. `OrderManager`
     und `PortfolioManager`/`apply_trade()` (über `TradingOrchestrator`)
     werten dieses Feld aus - siehe `OrderStatus.PARTIALLY_FILLED`.
+
+    `fee_asset` ist `None`, wenn der Broker keine Gebühren-Währung
+    unterscheidet (z. B. `PaperBroker`/`MockLiveBroker` - "Legacy"-Fall,
+    ebenso wenn ein `LiveBroker`-Ergebnis auf mehreren Fills mit
+    unterschiedlichen Gebühren-Assets beruht, siehe
+    `execution/live_broker.py`) - ein gesetzter Wert bedeutet, dass `fee`
+    eindeutig in diesem Asset denominiert ist. `TradingOrchestrator` darf
+    `fee` nur dann direkt zum Cash-Impact addieren, wenn `fee_asset is
+    None` oder `fee == 0.0` ist - ein bekanntes, von `None` verschiedenes
+    `fee_asset` könnte vom Quote-Asset des gehandelten Symbols abweichen
+    (z. B. Base-Asset-Gebühr bei einem BUY) und würde sonst eine
+    Einheiten-Vermischung in die Portfolio-Buchhaltung einführen.
     """
 
     success: bool
@@ -120,6 +132,7 @@ class ExecutionResult:
     status: ExecutionStatus = ExecutionStatus.SUCCESS
     broker_order_id: str | None = None
     filled_quantity: float | None = None
+    fee_asset: str | None = None
 
 
 def derive_order_status(execution_result: ExecutionResult) -> OrderStatus:

@@ -308,6 +308,15 @@ class LiveBroker(Broker):
         `avg_price` wird aus `cummulativeQuoteQty / executedQty` gebildet
         (funktioniert für beide Endpunkte identisch) statt aus dem
         `fills`-Array, das nur bei der Order-Platzierung vorliegt.
+
+        `fee_asset` wird nur gesetzt, wenn **alle** Fills derselben Order
+        dasselbe `commissionAsset` melden - bei mehreren Fills mit
+        unterschiedlichen Gebühren-Assets (z. B. teils in BNB, teils im
+        Base-Asset) bleibt `fee_asset` bewusst `None`, statt eines davon
+        willkürlich auszuwählen; `fee` bleibt in jedem Fall die reine
+        Summe aller `commission`-Werte, unabhängig vom Asset. `commission`
+        wird nie über `get_order_status()` geliefert (kein `fills`-Array),
+        `fee_asset` ist dort deshalb immer `None`, analog zu `fee=0.0`.
         """
 
         executed_qty = float(data.get("executedQty", 0.0))
@@ -317,8 +326,15 @@ class LiveBroker(Broker):
         broker_order_id = str(data["orderId"]) if "orderId" in data else None
 
         fee = 0.0
+        fee_asset = None
         if include_fills:
-            fee = sum(float(fill.get("commission", 0.0)) for fill in data.get("fills", []))
+            fills = data.get("fills", [])
+            fee = sum(float(fill.get("commission", 0.0)) for fill in fills)
+            fee_assets = {
+                fill["commissionAsset"] for fill in fills if fill.get("commissionAsset") is not None
+            }
+            if len(fee_assets) == 1:
+                fee_asset = next(iter(fee_assets))
 
         slippage = abs(avg_price - order.price) * executed_qty
 
@@ -342,6 +358,7 @@ class LiveBroker(Broker):
                 status=ExecutionStatus.UNKNOWN,
                 broker_order_id=broker_order_id,
                 filled_quantity=executed_qty,
+                fee_asset=fee_asset,
             )
 
         if executed_qty <= 0:
@@ -354,6 +371,7 @@ class LiveBroker(Broker):
                 status=ExecutionStatus.FAILED,
                 broker_order_id=None,
                 filled_quantity=0.0,
+                fee_asset=fee_asset,
             )
 
         return ExecutionResult(
@@ -365,4 +383,5 @@ class LiveBroker(Broker):
             status=ExecutionStatus.SUCCESS,
             broker_order_id=broker_order_id,
             filled_quantity=executed_qty,
+            fee_asset=fee_asset,
         )

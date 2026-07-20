@@ -239,6 +239,106 @@ def test_execute_partial_fill_returns_actual_filled_quantity():
     assert result.fee == pytest.approx(0.024)
 
 
+# --- execute(): commissionAsset / fee_asset -------------------------------------------------
+
+
+def test_execute_single_fill_captures_commission_asset():
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            return httpx.Response(200, json={"serverTime": 1_700_000_000_000})
+        if request.url.path == "/api/v3/order":
+            return _filled_order_response(
+                fills=[
+                    {
+                        "price": "60000.0",
+                        "qty": "0.1",
+                        "commission": "0.000001",
+                        "commissionAsset": "BTC",
+                    }
+                ],
+            )
+        raise AssertionError(f"Unerwarteter Aufruf: {request.url.path}")
+
+    broker = _broker(handler)
+
+    result = broker.execute(_order())
+
+    assert result.fee == pytest.approx(0.000001)
+    assert result.fee_asset == "BTC"
+
+
+def test_execute_multiple_fills_same_asset_captures_shared_commission_asset():
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            return httpx.Response(200, json={"serverTime": 1_700_000_000_000})
+        if request.url.path == "/api/v3/order":
+            return _filled_order_response(
+                executed_qty="0.1",
+                cumulative_quote_qty="6000.0",
+                fills=[
+                    {
+                        "price": "59990.0",
+                        "qty": "0.05",
+                        "commission": "0.02",
+                        "commissionAsset": "USDT",
+                    },
+                    {
+                        "price": "60010.0",
+                        "qty": "0.05",
+                        "commission": "0.03",
+                        "commissionAsset": "USDT",
+                    },
+                ],
+            )
+        raise AssertionError(f"Unerwarteter Aufruf: {request.url.path}")
+
+    broker = _broker(handler)
+
+    result = broker.execute(_order())
+
+    assert result.fee == pytest.approx(0.05)
+    assert result.fee_asset == "USDT"
+
+
+def test_execute_multiple_fills_different_assets_leaves_fee_asset_none():
+    """Unterschiedliche commissionAsset-Werte über mehrere Fills hinweg -
+    fee_asset bleibt bewusst None statt eines willkürlich gewählten Assets,
+    fee wird trotzdem als reine Summe weitergegeben."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/time":
+            return httpx.Response(200, json={"serverTime": 1_700_000_000_000})
+        if request.url.path == "/api/v3/order":
+            return _filled_order_response(
+                executed_qty="0.1",
+                cumulative_quote_qty="6000.0",
+                fills=[
+                    {
+                        "price": "59990.0",
+                        "qty": "0.05",
+                        "commission": "0.00001",
+                        "commissionAsset": "BNB",
+                    },
+                    {
+                        "price": "60010.0",
+                        "qty": "0.05",
+                        "commission": "0.03",
+                        "commissionAsset": "USDT",
+                    },
+                ],
+            )
+        raise AssertionError(f"Unerwarteter Aufruf: {request.url.path}")
+
+    broker = _broker(handler)
+
+    result = broker.execute(_order())
+
+    assert result.fee == pytest.approx(0.03001)
+    assert result.fee_asset is None
+
+
 def test_execute_binance_rejects_order_returns_failed_result():
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -467,8 +567,10 @@ def test_get_order_status_after_execute_queries_binance_with_symbol_and_orig_cli
 
     assert result is not None
     assert result.success is True
-    # get_order_status() liefert keine fills-Aufschlüsselung -> fee immer 0.0.
+    # get_order_status() liefert keine fills-Aufschlüsselung -> fee immer 0.0,
+    # fee_asset immer None (analog zu fee).
     assert result.fee == 0.0
+    assert result.fee_asset is None
 
 
 def test_get_order_status_binance_order_does_not_exist_returns_none():

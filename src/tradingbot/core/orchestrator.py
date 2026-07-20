@@ -189,10 +189,25 @@ class TradingOrchestrator:
                 # Gebühr zu einem korrekten Netto-Kapitaleffekt zusammenfasst.
                 # Gebühr/Slippage bleiben trotzdem separat im ExecutionResult
                 # sichtbar (siehe execution.fee / execution.slippage).
+                #
+                # Gebühr nur einrechnen, wenn ihr Asset unbekannt ist
+                # (execution.fee_asset is None - Legacy, z. B. PaperBroker/
+                # MockLiveBroker) oder die Gebühr exakt 0 ist (Einheit dann
+                # irrelevant). Ein bekanntes, von None verschiedenes
+                # fee_asset (siehe execution/live_broker.py) könnte vom
+                # Quote-Asset des Symbols abweichen (z. B. Base-Asset-
+                # Gebühr bei einem BUY) - ohne verlässliche Kenntnis der
+                # Quote-Währung wird eine solche Gebühr NICHT blind addiert,
+                # um keine unterschiedlichen Währungen zu vermischen. Sie
+                # bleibt trotzdem über execution.fee/.fee_asset sichtbar,
+                # nur eben nicht im Portfolio-Kapital verbucht.
+                fee_is_safe_to_include = execution.fee_asset is None or execution.fee == 0.0
+                included_fee = execution.fee if fee_is_safe_to_include else 0.0
+
                 if filled_order.side == "BUY":
-                    total_cash_impact = filled_order.price * actual_quantity + execution.fee
+                    total_cash_impact = filled_order.price * actual_quantity + included_fee
                 else:
-                    total_cash_impact = filled_order.price * actual_quantity - execution.fee
+                    total_cash_impact = filled_order.price * actual_quantity - included_fee
                 effective_price = total_cash_impact / actual_quantity
 
                 closed_trade = self._portfolio.apply_trade(
