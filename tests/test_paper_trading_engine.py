@@ -7,10 +7,12 @@ from tradingbot.core.orchestrator import TradingOrchestrator
 from tradingbot.data.market import MarketDataStore
 from tradingbot.data.models import MarketCandle
 from tradingbot.data.provider import DataProvider
+from tradingbot.execution.binance_account import BalanceSnapshot
 from tradingbot.execution.broker import Broker, PaperBroker
 from tradingbot.execution.models import ExecutionResult, ExecutionStatus, Order, OrderStatus
 from tradingbot.execution.order_repository import InMemoryOrderRepository, OrderRecord
 from tradingbot.paper_trading.audit import AuditEventType, SqliteAuditLog
+from tradingbot.paper_trading.balance_reconciliation import BalanceReconciler
 from tradingbot.paper_trading.engine import PaperTradingEngine
 from tradingbot.paper_trading.order_history import SqliteOrderHistory
 from tradingbot.paper_trading.persistence import SqliteSessionRepository
@@ -133,6 +135,10 @@ def _build_engine(
     strategy: Strategy | None = None,
     broker: Broker | None = None,
     reconciliation_service=None,
+    balance_account_reader=None,
+    balance_reconciler=None,
+    balance_base_asset: str | None = None,
+    balance_quote_asset: str | None = None,
     max_position_size: float = 1000.0,
 ):
     db_path = db_path if db_path is not None else str(tmp_path / "trading.sqlite3")
@@ -172,6 +178,10 @@ def _build_engine(
         max_exposure_per_asset_percent=max_exposure_per_asset_percent,
         now=clock,
         reconciliation_service=reconciliation_service,
+        balance_account_reader=balance_account_reader,
+        balance_reconciler=balance_reconciler,
+        balance_base_asset=balance_base_asset,
+        balance_quote_asset=balance_quote_asset,
     )
     return engine, trading_engine, portfolio, db_path
 
@@ -387,6 +397,183 @@ def test_start_writes_reconciliation_mismatch_audit_event(tmp_path):
     events = SqliteAuditLog(db_path).for_session("session-1")
     assert any(e.event_type == AuditEventType.RECONCILIATION_MISMATCH for e in events)
     assert not any(e.event_type == AuditEventType.SESSION_STARTED for e in events)
+
+
+# --- start(): Balance-Mismatch bricht den Start ab ----------------------------------------------
+
+
+class _FixedBalanceReader:
+    """Test-Double für `BinanceAccountReader` - liefert eine feste Liste
+    von `BalanceSnapshot` ohne Netzwerkzugriff (siehe execution/
+    binance_account.py für die echte, signierte Implementierung)."""
+
+    def __init__(self, balances: list[BalanceSnapshot]) -> None:
+        self._balances = balances
+
+    def get_balances(self) -> list[BalanceSnapshot]:
+        return self._balances
+
+
+def _matched_balance_reader() -> _FixedBalanceReader:
+    """Balance-Reader, dessen Bestände dem lokalen Portfolio aus
+    `_build_engine()` entsprechen (initial_capital=10000.0, keine
+    Position)."""
+
+    return _FixedBalanceReader(
+        [
+            BalanceSnapshot(asset="BTC", free=0.0, locked=0.0),
+            BalanceSnapshot(asset="USDT", free=10000.0, locked=0.0),
+        ]
+    )
+
+
+def _mismatched_balance_reader() -> _FixedBalanceReader:
+    """Balance-Reader, dessen BTC-Bestand vom lokalen Portfolio (keine
+    Position) abweicht - der klassische Balance-Mismatch."""
+
+    return _FixedBalanceReader(
+        [
+            BalanceSnapshot(asset="BTC", free=0.5, locked=0.0),
+            BalanceSnapshot(asset="USDT", free=10000.0, locked=0.0),
+        ]
+    )
+
+
+def test_start_without_balance_account_reader_behaves_unchanged(tmp_path):
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    engine, trading_engine, _, _ = _build_engine(tmp_path, _FixedCandleProvider([]), clock)
+
+    engine.start()
+
+    assert trading_engine.status()["running"] is True
+
+
+def test_start_with_balance_account_reader_and_no_mismatches_succeeds(tmp_path):
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    engine, trading_engine, _, _ = _build_engine(
+        tmp_path,
+        _FixedCandleProvider([]),
+        clock,
+        balance_account_reader=_matched_balance_reader(),
+        balance_reconciler=BalanceReconciler(),
+        balance_base_asset="BTC",
+        balance_quote_asset="USDT",
+    )
+
+    engine.start()
+
+    assert trading_engine.status()["running"] is True
+
+
+def test_start_aborts_with_runtime_error_on_balance_mismatch(tmp_path):
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    engine, trading_engine, _, _ = _build_engine(
+        tmp_path,
+        _FixedCandleProvider([]),
+        clock,
+        balance_account_reader=_mismatched_balance_reader(),
+        balance_reconciler=BalanceReconciler(),
+        balance_base_asset="BTC",
+        balance_quote_asset="USDT",
+    )
+
+    with pytest.raises(RuntimeError, match="Balance"):
+        engine.start()
+
+    assert trading_engine.status()["running"] is False
+
+
+def test_start_activates_kill_switch_on_balance_mismatch(tmp_path):
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    engine, _, _, _ = _build_engine(
+        tmp_path,
+        _FixedCandleProvider([]),
+        clock,
+        balance_account_reader=_mismatched_balance_reader(),
+        balance_reconciler=BalanceReconciler(),
+        balance_base_asset="BTC",
+        balance_quote_asset="USDT",
+    )
+
+    with pytest.raises(RuntimeError):
+        engine.start()
+
+    assert engine.risk_guard.state.kill_switch_active is True
+    assert "Balance-Mismatch" in engine.risk_guard.state.kill_switch_reason
+
+
+def test_start_persists_kill_switch_before_raising_on_balance_mismatch_survives_restart(tmp_path):
+    """Wie `test_start_persists_kill_switch_before_raising_survives_restart`,
+    für den Balance-Mismatch-Pfad."""
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    db_path = str(tmp_path / "trading.sqlite3")
+    engine, _, _, _ = _build_engine(
+        tmp_path,
+        _FixedCandleProvider([]),
+        clock,
+        db_path=db_path,
+        balance_account_reader=_mismatched_balance_reader(),
+        balance_reconciler=BalanceReconciler(),
+        balance_base_asset="BTC",
+        balance_quote_asset="USDT",
+    )
+
+    with pytest.raises(RuntimeError):
+        engine.start()
+
+    persisted = SqliteRiskStateRepository(db_path).load("session-1")
+    assert persisted is not None
+    assert persisted.kill_switch_active is True
+
+
+def test_start_writes_balance_mismatch_audit_event(tmp_path):
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    db_path = str(tmp_path / "trading.sqlite3")
+    engine, _, _, _ = _build_engine(
+        tmp_path,
+        _FixedCandleProvider([]),
+        clock,
+        db_path=db_path,
+        balance_account_reader=_mismatched_balance_reader(),
+        balance_reconciler=BalanceReconciler(),
+        balance_base_asset="BTC",
+        balance_quote_asset="USDT",
+    )
+
+    with pytest.raises(RuntimeError):
+        engine.start()
+
+    events = SqliteAuditLog(db_path).for_session("session-1")
+    assert any(e.event_type == AuditEventType.BALANCE_MISMATCH for e in events)
+    assert not any(e.event_type == AuditEventType.SESSION_STARTED for e in events)
+
+
+def test_start_balance_mismatch_does_not_mutate_portfolio(tmp_path):
+    """Keine automatische Portfolio-Korrektur - ein erkannter Balance-
+    Mismatch darf den lokalen Portfolio-Zustand nicht verändern."""
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    engine, _, portfolio, _ = _build_engine(
+        tmp_path,
+        _FixedCandleProvider([]),
+        clock,
+        balance_account_reader=_mismatched_balance_reader(),
+        balance_reconciler=BalanceReconciler(),
+        balance_base_asset="BTC",
+        balance_quote_asset="USDT",
+    )
+
+    with pytest.raises(RuntimeError):
+        engine.start()
+
+    assert portfolio.export_state().capital == 10000.0
+    assert portfolio.export_state().positions == []
 
 
 # --- run_cycle_once(): Blockade-Fälle ohne Orchestrator-Aufruf --------------------------------

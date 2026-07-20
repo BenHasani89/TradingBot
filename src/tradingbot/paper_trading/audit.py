@@ -24,6 +24,7 @@ class AuditEventType(Enum):
     RISK_EVENT = "risk_event"
     CYCLE_ERROR = "cycle_error"
     RECONCILIATION_MISMATCH = "reconciliation_mismatch"
+    BALANCE_MISMATCH = "balance_mismatch"
 
 
 @dataclass

@@ -18,12 +18,14 @@ from tradingbot.data.binance_provider import BinanceDataProvider
 from tradingbot.data.market import MarketDataStore
 from tradingbot.data.provider import DataProvider
 from tradingbot.data.simulated_provider import SimulatedDataProvider
+from tradingbot.execution.binance_account import BinanceAccountReader
 from tradingbot.execution.broker import Broker, PaperBroker
 from tradingbot.execution.live_broker import LiveBroker
 from tradingbot.execution.mock_broker import MockLiveBroker, ScenarioProvider
 from tradingbot.execution.order_repository import OrderRepository
 from tradingbot.execution.persistence import SqliteOrderRepository
 from tradingbot.paper_trading.audit import SqliteAuditLog
+from tradingbot.paper_trading.balance_reconciliation import BalanceReconciler
 from tradingbot.paper_trading.engine import PaperTradingEngine
 from tradingbot.paper_trading.health import HealthSnapshot, build_health_snapshot
 from tradingbot.paper_trading.order_history import SqliteOrderHistory
@@ -57,6 +59,29 @@ _LIVE_BASE_URLS = {
 Fehlt `TRADINGBOT_LIVE_ENVIRONMENT` oder hat einen unbekannten Wert, schlägt
 `_build_live_broker()` fehl statt still auf einen der beiden Werte
 zurückzufallen."""
+
+_KNOWN_QUOTE_ASSETS = ("USDT", "BUSD", "USDC", "BTC", "ETH", "BNB")
+"""Für die Symbol-Aufteilung der BalanceReconciliation (siehe
+`_split_symbol()`) - reine, listenbasierte Suffix-Erkennung ohne
+`exchangeInfo`-Abfrage, bewusst ausschliesslich hier und nicht in
+`BalanceReconciler` (siehe dessen Docstring: kein Symbol-Parsing dort)."""
+
+
+def _split_symbol(symbol: str) -> tuple[str, str]:
+    """Zerlegt ein Binance-Symbol in Base-/Quote-Asset (z. B. `"BTCUSDT"`
+    -> `("BTC", "USDT")`) - ausschliesslich für die BalanceReconciliation-
+    Verdrahtung in `build_engine()`. Kein stiller Rückfall bei einem
+    unbekannten Quote-Asset."""
+
+    for quote_asset in _KNOWN_QUOTE_ASSETS:
+        if symbol.endswith(quote_asset) and len(symbol) > len(quote_asset):
+            return symbol[: -len(quote_asset)], quote_asset
+    raise ValueError(
+        f"Symbol {symbol!r} konnte keinem bekannten Quote-Asset zugeordnet werden "
+        f"(bekannt: {_KNOWN_QUOTE_ASSETS}) - BalanceReconciliation kann nicht "
+        "aufgebaut werden."
+    )
+
 
 _STRATEGIES: dict[str, type[Strategy]] = {
     "simple": SimpleStrategy,
@@ -109,6 +134,23 @@ def _resolve_live_environment() -> str:
     return environment
 
 
+def _resolve_live_credentials() -> tuple[str, str]:
+    """Liest und validiert `TRADINGBOT_LIVE_API_KEY`/`_SECRET` - gemeinsam
+    von `_build_live_broker()` und der BalanceReconciliation-Verdrahtung in
+    `build_engine()` genutzt (dasselbe Prinzip wie `_resolve_live_environment()`
+    für die Umgebung). Kein stiller Rückfall, keine Persistenz."""
+
+    api_key = os.environ.get(_LIVE_API_KEY_ENV_VAR)
+    api_secret = os.environ.get(_LIVE_API_SECRET_ENV_VAR)
+    if not api_key or not api_secret:
+        raise ValueError(
+            f"RuntimeMode.LIVE erfordert die Umgebungsvariablen {_LIVE_API_KEY_ENV_VAR!r} "
+            f"und {_LIVE_API_SECRET_ENV_VAR!r} - mindestens eine davon ist nicht gesetzt. "
+            "Credentials werden nie in RuntimeConfig/Config-Dateien gespeichert."
+        )
+    return api_key, api_secret
+
+
 def _build_live_broker(
     config: RuntimeConfig, scenario_provider: ScenarioProvider | None, live_confirmation: str | None
 ) -> Broker:
@@ -128,15 +170,7 @@ def _build_live_broker(
             "Keine CLI-/Konfigurationsoption dafür, ausschliesslich programmatisch."
         )
 
-    api_key = os.environ.get(_LIVE_API_KEY_ENV_VAR)
-    api_secret = os.environ.get(_LIVE_API_SECRET_ENV_VAR)
-    if not api_key or not api_secret:
-        raise ValueError(
-            f"RuntimeMode.LIVE erfordert die Umgebungsvariablen {_LIVE_API_KEY_ENV_VAR!r} "
-            f"und {_LIVE_API_SECRET_ENV_VAR!r} - mindestens eine davon ist nicht gesetzt. "
-            "Credentials werden nie in RuntimeConfig/Config-Dateien gespeichert."
-        )
-
+    api_key, api_secret = _resolve_live_credentials()
     environment = _resolve_live_environment()
     return LiveBroker(api_key=api_key, api_secret=api_secret, base_url=_LIVE_BASE_URLS[environment])
 
@@ -258,6 +292,25 @@ def build_engine(
         broker=broker, order_repository=order_repository
     )
 
+    # BalanceReconciliation (Phase 1: nur Startup-Check, siehe
+    # paper_trading/engine.py::_run_startup_balance_reconciliation()) ist
+    # bewusst nur für RuntimeMode.LIVE verdrahtet - anders als
+    # ReconciliationService oben gibt es kein sinnvolles PAPER/MOCK-
+    # Äquivalent zu einem echten Binance-Kontostand. PAPER/MOCK/BACKTEST
+    # erhalten deshalb durchgängig None.
+    balance_account_reader: BinanceAccountReader | None = None
+    balance_reconciler: BalanceReconciler | None = None
+    balance_base_asset: str | None = None
+    balance_quote_asset: str | None = None
+    if config.mode == RuntimeMode.LIVE:
+        api_key, api_secret = _resolve_live_credentials()
+        environment = _resolve_live_environment()
+        balance_account_reader = BinanceAccountReader(
+            api_key=api_key, api_secret=api_secret, base_url=_LIVE_BASE_URLS[environment]
+        )
+        balance_reconciler = BalanceReconciler()
+        balance_base_asset, balance_quote_asset = _split_symbol(config.symbol)
+
     engine = PaperTradingEngine(
         engine=trading_engine,
         provider=_build_data_provider(config),
@@ -278,6 +331,10 @@ def build_engine(
         max_exposure_percent=config.max_exposure_percent,
         max_exposure_per_asset_percent=config.max_exposure_per_asset_percent,
         reconciliation_service=reconciliation_service,
+        balance_account_reader=balance_account_reader,
+        balance_reconciler=balance_reconciler,
+        balance_base_asset=balance_base_asset,
+        balance_quote_asset=balance_quote_asset,
     )
 
     return engine, SimpleLoopScheduler()

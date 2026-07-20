@@ -6,11 +6,13 @@ from tradingbot.cli import composition
 from tradingbot.cli.config import RuntimeMode, build_config
 from tradingbot.data.binance_provider import BinanceDataProvider
 from tradingbot.data.simulated_provider import SimulatedDataProvider
+from tradingbot.execution.binance_account import BinanceAccountReader
 from tradingbot.execution.broker import PaperBroker
 from tradingbot.execution.live_broker import LiveBroker
 from tradingbot.execution.mock_broker import MockExecutionScenario, MockLiveBroker, MockOutcome
 from tradingbot.execution.models import OrderStatus
 from tradingbot.execution.persistence import SqliteOrderRepository
+from tradingbot.paper_trading.balance_reconciliation import BalanceReconciler
 from tradingbot.paper_trading.engine import PaperTradingEngine
 from tradingbot.paper_trading.scheduler import Scheduler
 
@@ -314,6 +316,64 @@ def test_build_engine_live_mode_confirmed_with_credentials_builds_binance_data_p
     assert isinstance(engine._provider, BinanceDataProvider)
 
 
+# --- BalanceReconciliation-Verdrahtung (nur RuntimeMode.LIVE) -----------------------------------
+
+
+def test_build_engine_default_mode_does_not_build_balance_account_reader(tmp_path):
+
+    config = _config(tmp_path)
+
+    engine, _ = composition.build_engine(config)
+
+    assert engine._balance_account_reader is None
+    assert engine._balance_reconciler is None
+
+
+def test_build_engine_mock_mode_does_not_build_balance_account_reader(tmp_path):
+
+    config = _config(tmp_path, mode=RuntimeMode.MOCK)
+
+    def scenario_provider(order):
+        return MockExecutionScenario(MockOutcome.SUCCESS)
+
+    engine, _ = composition.build_engine(config, scenario_provider=scenario_provider)
+
+    assert engine._balance_account_reader is None
+    assert engine._balance_reconciler is None
+
+
+def test_build_engine_live_mode_builds_balance_account_reader_and_reconciler(
+    tmp_path, monkeypatch
+):
+
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_KEY", "key")
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_SECRET", "secret")
+    monkeypatch.setenv("TRADINGBOT_LIVE_ENVIRONMENT", "testnet")
+    _patch_binance_http(monkeypatch, _time_only_handler)
+    config = _config(tmp_path, mode=RuntimeMode.LIVE, symbol="BTCUSDT")
+
+    engine, _ = composition.build_engine(
+        config, live_confirmation=composition.LIVE_CONFIRMATION_PHRASE
+    )
+
+    assert isinstance(engine._balance_account_reader, BinanceAccountReader)
+    assert isinstance(engine._balance_reconciler, BalanceReconciler)
+    assert engine._balance_base_asset == "BTC"
+    assert engine._balance_quote_asset == "USDT"
+
+
+def test_build_engine_live_mode_symbol_with_unknown_quote_asset_raises(tmp_path, monkeypatch):
+
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_KEY", "key")
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_SECRET", "secret")
+    monkeypatch.setenv("TRADINGBOT_LIVE_ENVIRONMENT", "testnet")
+    _patch_binance_http(monkeypatch, _time_only_handler)
+    config = _config(tmp_path, mode=RuntimeMode.LIVE, symbol="XYZFOO")
+
+    with pytest.raises(ValueError, match="Quote-Asset"):
+        composition.build_engine(config, live_confirmation=composition.LIVE_CONFIRMATION_PHRASE)
+
+
 def test_build_engine_live_mode_executes_trade_via_mocked_binance(tmp_path, monkeypatch):
     """Volles Zusammenspiel gegen eine simulierte Binance-Antwort - kein
     echter Netzwerkzugriff, aber derselbe Codepfad wie im echten Betrieb."""
@@ -375,6 +435,19 @@ def test_build_engine_live_mode_executes_trade_via_mocked_binance(tmp_path, monk
                     "fills": [
                         {"price": "50000.0", "qty": "0.01", "commission": "0.5"}
                     ],
+                },
+            )
+        if request.url.path == "/api/v3/account":
+            # Entspricht dem frischen Portfolio (initial_capital=10000.0,
+            # keine Position) - BalanceReconciliation-Startup-Check
+            # (start()) darf hier keinen Mismatch erkennen.
+            return httpx.Response(
+                200,
+                json={
+                    "balances": [
+                        {"asset": "BTC", "free": "0.0", "locked": "0.0"},
+                        {"asset": "USDT", "free": "10000.0", "locked": "0.0"},
+                    ]
                 },
             )
         raise AssertionError(f"Unerwarteter Aufruf: {request.url.path}")

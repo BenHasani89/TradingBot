@@ -21,7 +21,12 @@ from tradingbot.core.models import TradingCycleResult
 from tradingbot.core.orchestrator import TradingOrchestrator
 from tradingbot.data.market import MarketDataStore
 from tradingbot.data.provider import DataProvider
+from tradingbot.execution.binance_account import BinanceAccountReader
 from tradingbot.paper_trading.audit import AuditEventType, SqliteAuditLog
+from tradingbot.paper_trading.balance_reconciliation import (
+    BalanceReconciler,
+    BalanceReconciliationResult,
+)
 from tradingbot.paper_trading.health import HealthSnapshot, build_health_snapshot
 from tradingbot.paper_trading.order_history import OrderExecution, SqliteOrderHistory
 from tradingbot.paper_trading.reconciliation import ReconciliationResult, ReconciliationService
@@ -82,6 +87,10 @@ class PaperTradingEngine:
         risk_id: str | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         reconciliation_service: ReconciliationService | None = None,
+        balance_account_reader: BinanceAccountReader | None = None,
+        balance_reconciler: BalanceReconciler | None = None,
+        balance_base_asset: str | None = None,
+        balance_quote_asset: str | None = None,
     ) -> None:
         self._engine = engine
         self._provider = provider
@@ -95,6 +104,10 @@ class PaperTradingEngine:
         self._audit_log = audit_log
         self._order_history = order_history
         self._reconciliation_service = reconciliation_service
+        self._balance_account_reader = balance_account_reader
+        self._balance_reconciler = balance_reconciler
+        self._balance_base_asset = balance_base_asset
+        self._balance_quote_asset = balance_quote_asset
         self._symbol = symbol
         self._timeframe = timeframe
         self._candle_limit = candle_limit
@@ -154,8 +167,18 @@ class PaperTradingEngine:
         erfordert manuellen Eingriff (`PortfolioRiskGuard.
         reset_kill_switch()`), kein automatischer Mechanismus dafür.
 
+        Ist zusätzlich ein `balance_account_reader` konfiguriert (nur
+        `RuntimeMode.LIVE`, siehe `cli/composition.py`), wird analog dazu
+        der lokale Portfolio-Zustand gegen den tatsächlichen Binance-
+        Kontostand geprüft (`BalanceReconciler.compare()`, rein lesend).
+        Bei jedem Mismatch dieselbe Eskalation wie oben: Kill-Switch,
+        persistierter `RiskState`, `BALANCE_MISMATCH`-Audit-Event,
+        Startabbruch - unabhängig davon, ob bereits ein Order-Mismatch
+        vorlag.
+
         Raises:
-            RuntimeError: bei mindestens einem Reconciliation-Mismatch.
+            RuntimeError: bei mindestens einem Reconciliation- oder
+                Balance-Mismatch.
         """
 
         portfolio_state = self._portfolio_repository.load(self._portfolio_id)
@@ -185,6 +208,16 @@ class PaperTradingEngine:
             if mismatches:
                 raise RuntimeError(
                     f"Session-Start abgebrochen: {len(mismatches)} Reconciliation-"
+                    f"Mismatch(es) erkannt (Session {self._session.session_id}). "
+                    "Kill-Switch aktiv und persistiert - manueller Eingriff "
+                    "erforderlich (siehe Audit-Log, PortfolioRiskGuard.reset_kill_switch())."
+                )
+
+        if self._balance_account_reader is not None:
+            balance_mismatches = self._run_startup_balance_reconciliation()
+            if balance_mismatches:
+                raise RuntimeError(
+                    f"Session-Start abgebrochen: {len(balance_mismatches)} Balance-"
                     f"Mismatch(es) erkannt (Session {self._session.session_id}). "
                     "Kill-Switch aktiv und persistiert - manueller Eingriff "
                     "erforderlich (siehe Audit-Log, PortfolioRiskGuard.reset_kill_switch())."
@@ -221,6 +254,41 @@ class PaperTradingEngine:
                     f"{mismatch.local_status.value if mismatch.local_status else None}, "
                     f"broker={mismatch.broker_status.value if mismatch.broker_status else None} "
                     f"- {mismatch.reason}"
+                ),
+                now=self._now(),
+            )
+
+        if mismatches:
+            self._risk_repository.save(self._risk_id, self._risk_guard.state)
+
+        return mismatches
+
+    def _run_startup_balance_reconciliation(self) -> list[BalanceReconciliationResult]:
+        """Vergleicht den lokalen Portfolio-Zustand mit dem tatsächlichen
+        Binance-Kontostand (`BalanceReconciler.compare()`, rein lesend -
+        keine automatische Portfolio-Korrektur), eskaliert jeden Mismatch
+        (Kill-Switch + Audit-Event) und gibt die gefundenen Mismatches
+        zurück - leer, wenn alles übereinstimmt."""
+
+        balances = self._balance_account_reader.get_balances()
+        results = self._balance_reconciler.compare(
+            local_portfolio=self._portfolio.export_state(),
+            balances=balances,
+            base_asset=self._balance_base_asset,
+            quote_asset=self._balance_quote_asset,
+        )
+        mismatches = [result for result in results if not result.matched]
+
+        for mismatch in mismatches:
+            self._risk_guard.trigger_kill_switch(
+                f"Balance-Mismatch bei Asset {mismatch.asset}: {mismatch.reason}"
+            )
+            self._audit_log.record(
+                self._session.session_id,
+                AuditEventType.BALANCE_MISMATCH,
+                (
+                    f"{mismatch.asset}: lokal={mismatch.local_quantity}, "
+                    f"binance={mismatch.binance_quantity} - {mismatch.reason}"
                 ),
                 now=self._now(),
             )
