@@ -85,6 +85,40 @@ class _FailingBroker(Broker):
         return None
 
 
+class _PartialFillBroker(Broker):
+    """Meldet einen Partial Fill mit einem vom Intent abweichenden
+    Fill-Preis - für Tests, die bestätigen, dass Reporting/Persistenz die
+    tatsächliche Ausführung abbilden, nicht die ursprünglich angefragte
+    Order (siehe `LiveBroker.execute()` für den echten Anwendungsfall:
+    LOT_SIZE-Rundung + realer durchschnittlicher Fill-Preis)."""
+
+    def __init__(self, filled_quantity: float, fill_price: float) -> None:
+        self._filled_quantity = filled_quantity
+        self._fill_price = fill_price
+
+    def execute(self, order: Order) -> ExecutionResult:
+        filled_order = Order(
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity,
+            price=self._fill_price,
+            client_order_id=order.client_order_id,
+        )
+        return ExecutionResult(
+            success=True,
+            order=filled_order,
+            message="Teilweise gefüllt",
+            fee=0.0,
+            slippage=0.0,
+            status=ExecutionStatus.SUCCESS,
+            broker_order_id=order.client_order_id,
+            filled_quantity=self._filled_quantity,
+        )
+
+    def get_order_status(self, client_order_id: str) -> ExecutionResult | None:
+        return None
+
+
 def _build_engine(
     tmp_path,
     provider: DataProvider,
@@ -99,6 +133,7 @@ def _build_engine(
     strategy: Strategy | None = None,
     broker: Broker | None = None,
     reconciliation_service=None,
+    max_position_size: float = 1000.0,
 ):
     db_path = db_path if db_path is not None else str(tmp_path / "trading.sqlite3")
 
@@ -107,7 +142,7 @@ def _build_engine(
     orchestrator = TradingOrchestrator(
         engine=trading_engine,
         strategy=strategy if strategy is not None else SimpleStrategy(),
-        risk_manager=RiskManager(max_position_size=1000.0),
+        risk_manager=RiskManager(max_position_size=max_position_size),
         portfolio=portfolio,
         broker=broker if broker is not None else PaperBroker(),
     )
@@ -656,6 +691,62 @@ def test_successful_execution_is_recorded_in_order_history(tmp_path):
     assert latest.client_order_id
     assert latest.broker_order_id == latest.client_order_id
     assert latest.status == ExecutionStatus.SUCCESS
+
+
+def test_partial_fill_order_history_records_actual_execution_not_intent(tmp_path):
+    """Kernszenario des Audit-Consistency-Fixes: order_execution muss die
+    tatsächliche Ausführung zeigen (Menge/Preis), nicht die ursprünglich
+    angefragte Order - exakt der reale Fall aus dem ersten LIVE-Testnet-
+    Lauf (LOT_SIZE-Rundung + abweichender Fill-Preis)."""
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    t1 = clock.current
+    t2 = t1 + timedelta(hours=1)
+    # current_price=64199.5, max_position_size=64.1995 -> angefragte
+    # quantity = 64.1995 / 64199.5 = 0.001 exakt.
+    provider = _FixedCandleProvider([[_candle(t1, 64000.0), _candle(t2, 64199.5)]])
+    db_path = str(tmp_path / "trading.sqlite3")
+    broker = _PartialFillBroker(filled_quantity=0.00023, fill_price=64285.91)
+    engine, _, _, _ = _build_engine(
+        tmp_path, provider, clock, db_path=db_path, broker=broker, max_position_size=64.1995
+    )
+    engine.start()
+
+    result = engine.run_cycle_once()
+
+    assert result is not None
+    assert result.order.quantity == pytest.approx(0.001)
+    assert result.order.price == pytest.approx(64199.5)
+
+    latest = SqliteOrderHistory(db_path).latest("session-1")
+    assert latest is not None
+    assert latest.quantity == pytest.approx(0.00023)
+    assert latest.price == pytest.approx(64285.91)
+    # Nicht die ursprünglich angefragten Werte:
+    assert latest.quantity != pytest.approx(0.001)
+    assert latest.price != pytest.approx(64199.5)
+
+
+def test_partial_fill_audit_event_shows_intent_and_execution_separately(tmp_path):
+
+    clock = _Clock(datetime(2026, 7, 18, 12, tzinfo=UTC))
+    t1 = clock.current
+    t2 = t1 + timedelta(hours=1)
+    provider = _FixedCandleProvider([[_candle(t1, 64000.0), _candle(t2, 64199.5)]])
+    db_path = str(tmp_path / "trading.sqlite3")
+    broker = _PartialFillBroker(filled_quantity=0.00023, fill_price=64285.91)
+    engine, _, _, _ = _build_engine(
+        tmp_path, provider, clock, db_path=db_path, broker=broker, max_position_size=64.1995
+    )
+    engine.start()
+
+    engine.run_cycle_once()
+
+    events = SqliteAuditLog(db_path).for_session("session-1")
+    order_executed = next(e for e in events if e.event_type == AuditEventType.ORDER_EXECUTED)
+
+    assert "angefragt=0.001@64199.5" in order_executed.message
+    assert "ausgeführt=0.00023@64285.91" in order_executed.message
 
 
 # --- HealthSnapshot -------------------------------------------------------------------------

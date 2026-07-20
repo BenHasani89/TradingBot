@@ -322,31 +322,56 @@ class PaperTradingEngine:
         return result
 
     def _record_execution_if_any(self, result: TradingCycleResult) -> None:
+        """Protokolliert die tatsächliche Ausführung, nicht die ursprünglich
+        angefragte Order: `execution.filled_quantity` (die einzige
+        authoritative Quelle für die tatsächlich gefüllte Menge - `execution.
+        order.quantity` spiegelt nur die an den Broker gesendete, ggf. auf
+        LOT_SIZE gerundete Anfrage, siehe `execution/live_broker.py`) mit
+        Fallback auf `execution.order.quantity` für Broker ohne
+        Teilausführungs-Unterscheidung (PaperBroker/MockLiveBroker -
+        "Legacy", siehe `execution.models.derive_order_status()`), sowie
+        `execution.order.price` (der echte durchschnittliche Fill-Preis,
+        nicht der Signalzeit-Preis der ursprünglichen Order). `result.order`
+        (die ursprüngliche Anfrage) bleibt zusätzlich im Audit-Event
+        sichtbar - Intent und Execution nebeneinander, keines verdrängt das
+        andere."""
+
         if result.execution is None:
             return
 
         order = result.order
+        execution = result.execution
+        actual_quantity = (
+            execution.filled_quantity
+            if execution.filled_quantity is not None
+            else execution.order.quantity
+        )
+        actual_price = execution.order.price
+
         self._order_history.append(
             self._session.session_id,
             OrderExecution(
                 timestamp=self._now(),
                 symbol=order.symbol,
                 side=order.side,
-                quantity=order.quantity,
-                price=order.price,
-                fee=result.execution.fee,
-                success=result.execution.success,
+                quantity=actual_quantity,
+                price=actual_price,
+                fee=execution.fee,
+                success=execution.success,
                 client_order_id=order.client_order_id,
-                broker_order_id=result.execution.broker_order_id,
-                status=result.execution.status,
+                broker_order_id=execution.broker_order_id,
+                status=execution.status,
             ),
         )
 
-        if result.execution.success:
+        if execution.success:
             self._audit_log.record(
                 self._session.session_id,
                 AuditEventType.ORDER_EXECUTED,
-                f"{order.side} {order.quantity} {order.symbol} @ {order.price}",
+                (
+                    f"{order.side} angefragt={order.quantity}@{order.price} "
+                    f"ausgeführt={actual_quantity}@{actual_price} {order.symbol}"
+                ),
                 now=self._now(),
             )
 

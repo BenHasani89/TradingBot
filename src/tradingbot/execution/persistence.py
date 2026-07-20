@@ -31,18 +31,26 @@ CREATE TABLE IF NOT EXISTS order_record (
     execution_slippage REAL,
     execution_status TEXT,
     execution_broker_order_id TEXT,
-    execution_filled_quantity REAL
+    execution_filled_quantity REAL,
+    execution_price REAL
 )
 """
 
 _SELECT_COLUMNS = (
     "client_order_id, symbol, side, quantity, price, status, created_at, updated_at, "
     "execution_success, execution_message, execution_fee, execution_slippage, "
-    "execution_status, execution_broker_order_id, execution_filled_quantity"
+    "execution_status, execution_broker_order_id, execution_filled_quantity, execution_price"
 )
 
 
 def _row_to_record(row: tuple) -> OrderRecord:
+    """`order`/`price` (oben) sind die ursprünglich angefragte Order
+    (Intent) - `execution_price` ist der separat gespeicherte, echte
+    durchschnittliche Fill-Preis (siehe `execution/live_broker.py`).
+    `execution_result.order` wird deshalb mit `execution_price` (falls
+    vorhanden) statt der Intent-`price` rekonstruiert, damit ein
+    geladener `OrderRecord` dieselbe Intent/Execution-Trennung abbildet
+    wie ein frisch von `LiveBroker.execute()` erzeugter."""
 
     (
         client_order_id,
@@ -60,6 +68,7 @@ def _row_to_record(row: tuple) -> OrderRecord:
         execution_status,
         execution_broker_order_id,
         execution_filled_quantity,
+        execution_price,
     ) = row
 
     order = Order(
@@ -72,9 +81,16 @@ def _row_to_record(row: tuple) -> OrderRecord:
 
     execution_result = None
     if execution_success is not None:
+        execution_order = Order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=execution_price if execution_price is not None else price,
+            client_order_id=client_order_id,
+        )
         execution_result = ExecutionResult(
             success=bool(execution_success),
-            order=order,
+            order=execution_order,
             message=execution_message,
             fee=execution_fee,
             slippage=execution_slippage,
@@ -114,7 +130,12 @@ class SqliteOrderRepository(OrderRepository):
         return sqlite3.connect(self._db_path)
 
     def save(self, order_record: OrderRecord) -> None:
-        """Speichert `order_record` als vollständigen, atomaren Snapshot."""
+        """Speichert `order_record` als vollständigen, atomaren Snapshot.
+
+        `execution_price` wird aus `execution_result.order.price`
+        entnommen - bei einem von `LiveBroker` gelieferten `ExecutionResult`
+        der echte durchschnittliche Fill-Preis, nicht der Intent-Preis der
+        ursprünglichen Order (siehe `execution/live_broker.py`)."""
 
         execution_result = order_record.execution_result
 
@@ -127,8 +148,8 @@ class SqliteOrderRepository(OrderRepository):
                     "created_at, updated_at, "
                     "execution_success, execution_message, execution_fee, "
                     "execution_slippage, execution_status, execution_broker_order_id, "
-                    "execution_filled_quantity"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "execution_filled_quantity, execution_price"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         order_record.client_order_id,
                         order_record.order.symbol,
@@ -145,6 +166,7 @@ class SqliteOrderRepository(OrderRepository):
                         execution_result.status.value if execution_result else None,
                         execution_result.broker_order_id if execution_result else None,
                         execution_result.filled_quantity if execution_result else None,
+                        execution_result.order.price if execution_result else None,
                     ),
                 )
         finally:

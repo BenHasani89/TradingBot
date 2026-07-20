@@ -92,6 +92,81 @@ def test_save_and_get_roundtrip_with_execution_result(tmp_path):
     assert loaded.execution_result.filled_quantity == 0.05
 
 
+def test_save_and_get_roundtrip_persists_real_execution_price_distinct_from_intent(tmp_path):
+    """Kern des Audit-Consistency-Fixes auf Repository-Ebene: der echte
+    Fill-Preis (execution_result.order.price) muss unabhängig vom
+    Intent-Preis (order.price) gespeichert und beim Laden wieder auf
+    execution_result.order.price abgebildet werden - nicht auf den
+    Intent-Preis zurückfallen, solange execution_price vorhanden ist."""
+
+    repository = _repository(tmp_path)
+    order = _order()  # price=60000.0 (Intent)
+    filled_order = Order(
+        symbol=order.symbol,
+        side=order.side,
+        quantity=order.quantity,
+        price=60123.45,  # echter, abweichender Fill-Preis
+        client_order_id=order.client_order_id,
+    )
+    execution_result = ExecutionResult(
+        success=True,
+        order=filled_order,
+        message="Binance: Order-Status FILLED",
+        fee=0.0,
+        slippage=123.45 * 0.1,
+        status=ExecutionStatus.SUCCESS,
+        broker_order_id="order-1",
+        filled_quantity=0.1,
+    )
+    record = OrderRecord(
+        client_order_id="order-1",
+        order=order,
+        status=OrderStatus.FILLED,
+        created_at=_NOW,
+        updated_at=_NOW,
+        execution_result=execution_result,
+    )
+
+    repository.save(record)
+    loaded = repository.get("order-1")
+
+    # Intent bleibt unverändert sichtbar:
+    assert loaded.order.price == 60000.0
+    # Execution zeigt den echten, abweichenden Fill-Preis:
+    assert loaded.execution_result.order.price == 60123.45
+
+
+def test_save_and_get_roundtrip_without_execution_price_falls_back_to_intent_price(tmp_path):
+    """Legacy-Fall (z. B. PaperBroker/MockLiveBroker ohne abweichenden
+    Fill-Preis): execution_result.order.price == order.price, entspricht
+    weiterhin dem bisherigen Verhalten."""
+
+    repository = _repository(tmp_path)
+    order = _order()
+    execution_result = ExecutionResult(
+        success=True,
+        order=order,
+        message="Paper Order ausgeführt",
+        fee=0.0,
+        slippage=0.0,
+        status=ExecutionStatus.SUCCESS,
+        broker_order_id="order-1",
+    )
+    record = OrderRecord(
+        client_order_id="order-1",
+        order=order,
+        status=OrderStatus.FILLED,
+        created_at=_NOW,
+        updated_at=_NOW,
+        execution_result=execution_result,
+    )
+
+    repository.save(record)
+    loaded = repository.get("order-1")
+
+    assert loaded.execution_result.order.price == 60000.0
+
+
 def test_save_overwrites_previous_record_for_same_client_order_id(tmp_path):
 
     repository = _repository(tmp_path)
