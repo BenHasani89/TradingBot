@@ -14,7 +14,9 @@ from tradingbot.cli.config import RuntimeConfig, RuntimeMode
 from tradingbot.core.engine import TradingEngine
 from tradingbot.core.models import ExecutionCostEstimate
 from tradingbot.core.orchestrator import TradingOrchestrator
+from tradingbot.data.binance_provider import BinanceDataProvider
 from tradingbot.data.market import MarketDataStore
+from tradingbot.data.provider import DataProvider
 from tradingbot.data.simulated_provider import SimulatedDataProvider
 from tradingbot.execution.broker import Broker, PaperBroker
 from tradingbot.execution.live_broker import LiveBroker
@@ -90,6 +92,23 @@ def _build_mock_broker(
     return MockLiveBroker(scenario_provider=scenario_provider)
 
 
+def _resolve_live_environment() -> str:
+    """Liest und validiert `TRADINGBOT_LIVE_ENVIRONMENT` - gemeinsam von
+    `_build_live_broker()` und `_build_binance_data_provider()` genutzt,
+    damit Handelsausführung und Marktdaten immer dieselbe Binance-Umgebung
+    (testnet/production) verwenden. Kein stiller Rückfall auf einen der
+    beiden Werte."""
+
+    environment = os.environ.get(_LIVE_ENVIRONMENT_ENV_VAR)
+    if environment not in _LIVE_BASE_URLS:
+        raise ValueError(
+            f"RuntimeMode.LIVE erfordert die Umgebungsvariable {_LIVE_ENVIRONMENT_ENV_VAR!r} "
+            f"mit dem Wert 'testnet' oder 'production' - aktueller Wert: {environment!r}. "
+            "Kein stiller Rückfall auf einen der beiden Werte."
+        )
+    return environment
+
+
 def _build_live_broker(
     config: RuntimeConfig, scenario_provider: ScenarioProvider | None, live_confirmation: str | None
 ) -> Broker:
@@ -118,14 +137,7 @@ def _build_live_broker(
             "Credentials werden nie in RuntimeConfig/Config-Dateien gespeichert."
         )
 
-    environment = os.environ.get(_LIVE_ENVIRONMENT_ENV_VAR)
-    if environment not in _LIVE_BASE_URLS:
-        raise ValueError(
-            f"RuntimeMode.LIVE erfordert die Umgebungsvariable {_LIVE_ENVIRONMENT_ENV_VAR!r} "
-            f"mit dem Wert 'testnet' oder 'production' - aktueller Wert: {environment!r}. "
-            "Kein stiller Rückfall auf einen der beiden Werte."
-        )
-
+    environment = _resolve_live_environment()
     return LiveBroker(api_key=api_key, api_secret=api_secret, base_url=_LIVE_BASE_URLS[environment])
 
 
@@ -155,6 +167,44 @@ def _build_broker(
             "noch kein Broker dafür registriert."
         ) from None
     return factory(config, scenario_provider, live_confirmation)
+
+
+def _build_simulated_data_provider(config: RuntimeConfig) -> DataProvider:
+    return SimulatedDataProvider()
+
+
+def _build_binance_data_provider(config: RuntimeConfig) -> DataProvider:
+    """Baut einen `BinanceDataProvider` - dieselbe Umgebungsauflösung wie
+    `_build_live_broker()`, damit Marktdaten und Order-Ausführung immer
+    gegen dieselbe Binance-Umgebung laufen (siehe
+    `data/binance_provider.py`-Moduldocstring). Braucht keine Credentials,
+    keine eigene Bestätigungsphrase - der öffentliche `klines`-Endpoint
+    ist unsigniert."""
+
+    environment = _resolve_live_environment()
+    return BinanceDataProvider(base_url=_LIVE_BASE_URLS[environment])
+
+
+# RuntimeMode.LIVE erhält echte Binance-Marktdaten statt SimulatedDataProvider
+# - PAPER/MOCK bleiben unverändert bei SimulatedDataProvider (siehe
+# data/binance_provider.py). Dieselbe Dict-Dispatch-Struktur wie
+# _BROKER_FACTORIES, kein if/else im Trading-Code.
+_DATA_PROVIDER_FACTORIES: dict[RuntimeMode, Callable[[RuntimeConfig], DataProvider]] = {
+    RuntimeMode.PAPER: _build_simulated_data_provider,
+    RuntimeMode.MOCK: _build_simulated_data_provider,
+    RuntimeMode.LIVE: _build_binance_data_provider,
+}
+
+
+def _build_data_provider(config: RuntimeConfig) -> DataProvider:
+    try:
+        factory = _DATA_PROVIDER_FACTORIES[config.mode]
+    except KeyError:
+        raise ValueError(
+            f"RuntimeMode {config.mode.value!r} ist architektonisch vorbereitet, aber "
+            "noch kein DataProvider dafür registriert."
+        ) from None
+    return factory(config)
 
 
 def build_engine(
@@ -210,7 +260,7 @@ def build_engine(
 
     engine = PaperTradingEngine(
         engine=trading_engine,
-        provider=SimulatedDataProvider(),
+        provider=_build_data_provider(config),
         store=MarketDataStore(),
         orchestrator=orchestrator,
         portfolio=portfolio,

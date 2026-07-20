@@ -4,6 +4,8 @@ import pytest
 import tradingbot.execution.live_broker as live_broker_module
 from tradingbot.cli import composition
 from tradingbot.cli.config import RuntimeMode, build_config
+from tradingbot.data.binance_provider import BinanceDataProvider
+from tradingbot.data.simulated_provider import SimulatedDataProvider
 from tradingbot.execution.broker import PaperBroker
 from tradingbot.execution.live_broker import LiveBroker
 from tradingbot.execution.mock_broker import MockExecutionScenario, MockLiveBroker, MockOutcome
@@ -149,6 +151,26 @@ def test_build_engine_default_mode_uses_paper_broker(tmp_path):
     assert isinstance(engine._orchestrator._broker, PaperBroker)
 
 
+def test_build_engine_default_mode_uses_simulated_data_provider(tmp_path):
+
+    config = _config(tmp_path)
+    engine, _ = composition.build_engine(config)
+
+    assert isinstance(engine._provider, SimulatedDataProvider)
+
+
+def test_build_engine_mock_mode_uses_simulated_data_provider(tmp_path):
+
+    config = _config(tmp_path, mode=RuntimeMode.MOCK)
+
+    def scenario_provider(order):
+        return MockExecutionScenario(MockOutcome.SUCCESS)
+
+    engine, _ = composition.build_engine(config, scenario_provider=scenario_provider)
+
+    assert isinstance(engine._provider, SimulatedDataProvider)
+
+
 def test_build_engine_mock_mode_without_scenario_provider_raises(tmp_path):
 
     config = _config(tmp_path, mode=RuntimeMode.MOCK)
@@ -275,6 +297,23 @@ def test_build_engine_live_mode_confirmed_with_credentials_builds_live_broker(
     assert isinstance(engine._orchestrator._broker, LiveBroker)
 
 
+def test_build_engine_live_mode_confirmed_with_credentials_builds_binance_data_provider(
+    tmp_path, monkeypatch
+):
+
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_KEY", "key")
+    monkeypatch.setenv("TRADINGBOT_LIVE_API_SECRET", "secret")
+    monkeypatch.setenv("TRADINGBOT_LIVE_ENVIRONMENT", "testnet")
+    _patch_binance_http(monkeypatch, _time_only_handler)
+    config = _config(tmp_path, mode=RuntimeMode.LIVE)
+
+    engine, _ = composition.build_engine(
+        config, live_confirmation=composition.LIVE_CONFIRMATION_PHRASE
+    )
+
+    assert isinstance(engine._provider, BinanceDataProvider)
+
+
 def test_build_engine_live_mode_executes_trade_via_mocked_binance(tmp_path, monkeypatch):
     """Volles Zusammenspiel gegen eine simulierte Binance-Antwort - kein
     echter Netzwerkzugriff, aber derselbe Codepfad wie im echten Betrieb."""
@@ -282,6 +321,29 @@ def test_build_engine_live_mode_executes_trade_via_mocked_binance(tmp_path, monk
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v3/time":
             return httpx.Response(200, json={"serverTime": 1700000000000})
+        if request.url.path == "/api/v3/klines":
+            # 5 Kerzen mit steigendem Schlusskurs - SimpleStrategy liefert BUY.
+            base_time = 1_700_000_000_000
+            return httpx.Response(
+                200,
+                json=[
+                    [
+                        base_time + i * 3_600_000,
+                        "100.0",
+                        "101.0",
+                        "99.0",
+                        str(100.0 + i),
+                        "10.0",
+                        base_time + i * 3_600_000 + 3_600_000,
+                        "1000.0",
+                        5,
+                        "5.0",
+                        "500.0",
+                        "0",
+                    ]
+                    for i in range(5)
+                ],
+            )
         if request.url.path == "/api/v3/order":
             return httpx.Response(
                 200,
